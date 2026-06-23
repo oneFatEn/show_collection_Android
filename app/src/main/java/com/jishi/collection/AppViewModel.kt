@@ -27,6 +27,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     selectedCategoryName = home.categories.firstOrNull { category ->
                         category.id == it.selectedCategoryId
                     }?.name ?: it.selectedCategoryName,
@@ -45,6 +46,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     selectedCategoryId = category.id,
                     selectedCategoryName = category.name,
                     notes = notes,
+                    highlightedNoteId = null,
+                    message = null,
+                )
+            }
+        }
+    }
+
+    fun openSearchResult(categoryId: String, noteId: String?) {
+        viewModelScope.launch {
+            val category = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return@launch
+            val notes = repository.notesForCategory(category.id)
+            _uiState.update {
+                it.copy(
+                    screen = AppScreen.CategoryNotes,
+                    previousScreen = AppScreen.Home,
+                    selectedCategoryId = category.id,
+                    selectedCategoryName = category.name,
+                    notes = notes,
+                    highlightedNoteId = noteId,
                     message = null,
                 )
             }
@@ -52,17 +72,79 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun editCategory(categoryId: String) {
-        val categoryName = uiState.value.categories.firstOrNull { it.id == categoryId }?.name ?: "分类"
-        _uiState.update { it.copy(message = "分类编辑入口已预留：$categoryName") }
+        _uiState.update {
+            it.copy(
+                editingCategoryId = categoryId,
+                message = null,
+            )
+        }
+    }
+
+    fun dismissCategoryEditor() {
+        _uiState.update { it.copy(editingCategoryId = null) }
+    }
+
+    fun saveCategoryName(categoryId: String, name: String) {
+        viewModelScope.launch {
+            repository.renameCategory(categoryId, name)
+            val home = repository.loadHome()
+            _uiState.update {
+                it.copy(
+                    categories = home.categories,
+                    suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
+                    selectedCategoryName = home.categories.firstOrNull { category ->
+                        category.id == it.selectedCategoryId
+                    }?.name ?: it.selectedCategoryName,
+                    editingCategoryId = null,
+                    message = null,
+                )
+            }
+        }
     }
 
     fun startRednoteSync() {
+        if (!repository.hasRednoteLoginState()) {
+            _uiState.update {
+                it.copy(
+                    screen = AppScreen.Login,
+                    previousScreen = it.screen,
+                    pendingSyncAfterLogin = true,
+                    rednoteSyncRequested = false,
+                    isSyncing = false,
+                    message = "请先登录小红书，登录成功后会自动同步收藏",
+                )
+            }
+            return
+        }
         _uiState.update {
             it.copy(
                 rednoteSyncRequested = true,
                 isSyncing = true,
-                message = "正在通过隐藏 WebView 同步小红书收藏...",
+                message = null,
             )
+        }
+    }
+
+    fun onRednoteLoginReady() {
+        _uiState.update {
+            if (it.pendingSyncAfterLogin) {
+                it.copy(
+                    screen = AppScreen.Home,
+                    previousScreen = null,
+                    pendingSyncAfterLogin = false,
+                    rednoteSyncRequested = true,
+                    isSyncing = true,
+                    message = "登录成功，正在同步收藏...",
+                )
+            } else {
+                it.copy(
+                    screen = it.previousScreen ?: AppScreen.Profile,
+                    previousScreen = null,
+                    pendingSyncAfterLogin = false,
+                    message = "小红书登录态已就绪",
+                )
+            }
         }
     }
 
@@ -79,7 +161,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isSyncing = false,
                     categories = home.categories,
                     suggestions = home.suggestions,
-                    message = message,
+                    searchableNotes = home.searchableNotes,
+                    message = syncDoneMessage(message),
                 )
             }
         }
@@ -95,7 +178,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isSyncing = false,
                     categories = home.categories,
                     suggestions = home.suggestions,
-                    message = "新增 ${result.inserted} 条收藏，待确认分类 ${home.suggestions.size} 组",
+                    searchableNotes = home.searchableNotes,
+                    message = "已更新 +${result.inserted}",
                 )
             }
         }
@@ -113,10 +197,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             isSyncing = hiddenSyncActive,
                             categories = home.categories,
                             suggestions = home.suggestions,
+                            searchableNotes = home.searchableNotes,
                             message = if (hiddenSyncActive) {
                                 "已入库 ${result.inserted} 条收藏，继续同步..."
                             } else {
-                                "新增 ${result.inserted} 条收藏，待确认分类 ${home.suggestions.size} 组"
+                                "已更新 +${result.inserted}"
                             },
                         )
                     }
@@ -141,6 +226,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     message = "已创建分类：$name",
                 )
             }
@@ -155,6 +241,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     message = "已保留在待整理",
                 )
             }
@@ -176,6 +263,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 AppUiState(
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     message = "已清除本地索引和分类关系",
                 )
             }
@@ -183,13 +271,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearWebLoginState() {
-        repository.clearWebLoginState()
-        _uiState.update {
-            it.copy(
-                rednoteSyncRequested = false,
-                isSyncing = false,
-                message = "已清除 WebView 登录态和小红书签名本地数据",
-            )
+        viewModelScope.launch {
+            repository.clearWebLoginState()
+            repository.clearAllLocalData()
+            val home = repository.loadHome()
+            _uiState.update {
+                AppUiState(
+                    screen = AppScreen.Home,
+                    categories = home.categories,
+                    suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
+                    message = "已退出登录，并清空本地收藏索引",
+                )
+            }
         }
     }
 
@@ -205,26 +299,57 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun go(screen: AppScreen) {
-        _uiState.update { it.copy(screen = screen, message = null) }
+        _uiState.update {
+            it.copy(
+                screen = screen,
+                previousScreen = if (screen.isTopLevel()) it.previousScreen else it.screen,
+                message = null,
+            )
+        }
     }
+
+    fun back() {
+        _uiState.update {
+            it.copy(
+                screen = it.previousScreen ?: AppScreen.Home,
+                previousScreen = null,
+                message = null,
+            )
+        }
+    }
+}
+
+private fun syncDoneMessage(raw: String): String {
+    val count = Regex("""共读取\s*(\d+)\s*条""").find(raw)?.groupValues?.getOrNull(1)
+        ?: Regex("""(\d+)""").find(raw)?.groupValues?.getOrNull(1)
+    return if (count != null) "已更新 +$count" else "已更新"
 }
 
 data class AppUiState(
     val screen: AppScreen = AppScreen.Home,
+    val previousScreen: AppScreen? = null,
     val categories: List<CategorySummary> = emptyList(),
     val suggestions: List<PendingCategorySuggestion> = emptyList(),
+    val searchableNotes: List<SearchableNote> = emptyList(),
     val notes: List<NoteCard> = emptyList(),
     val selectedCategoryId: String? = null,
     val selectedCategoryName: String = "",
+    val highlightedNoteId: String? = null,
+    val editingCategoryId: String? = null,
     val isSyncing: Boolean = false,
     val rednoteSyncRequested: Boolean = false,
+    val pendingSyncAfterLogin: Boolean = false,
     val message: String? = null,
 )
 
 enum class AppScreen {
     Home,
+    Profile,
     Login,
     CategoryNotes,
-    Suggestions,
     Settings,
+}
+
+private fun AppScreen.isTopLevel(): Boolean {
+    return this == AppScreen.Home || this == AppScreen.Profile
 }

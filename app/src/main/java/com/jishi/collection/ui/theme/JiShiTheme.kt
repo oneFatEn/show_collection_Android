@@ -6,14 +6,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 object JiShiColors {
-    val Paper = Color(0xFFF5F4F1)
-    val Surface = Color(0xFFFBFAF7)
-    val TextPrimary = Color(0xFF20211F)
-    val TextSecondary = Color(0xFF777A73)
-    val TextTertiary = Color(0xFFA6A69F)
-    val Hairline = Color(0xFFE6E3DC)
-    val QuietAccent = Color(0xFF2F6B4F)
-    val SearchSurface = Color(0xFFF0EFEB)
+    val Paper = Color(0xFFF8F7F5)
+    val Surface = Color(0xFFFFFFFF)
+    val TextPrimary = Color(0xFF1A1A1A)
+    val TextSecondary = Color(0xFF6F6F68)
+    val TextTertiary = Color(0xFF9B9B93)
+    val Hairline = Color(0x12000000)
+    val QuietAccent = Color(0xFF1A1A1A)
+    val SearchSurface = Color(0xFFF0EEEB)
+    val Accent = Color(0xFFEDECEA)
 }
 
 val ScreenHorizontalPadding = 28
@@ -36,4 +37,3 @@ fun JiShiTheme(content: @Composable () -> Unit) {
         content = content,
     )
 }
-

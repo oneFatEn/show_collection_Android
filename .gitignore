@@ -1,0 +1,45 @@
+# Local machine configuration
+local.properties
+*.local
+.env
+.env.*
+!.env.example
+
+# Android Studio / IntelliJ local state
+.idea/
+*.iml
+
+# Gradle dependency/cache state
+.gradle/
+build/
+**/build/
+
+# Android generated files
+captures/
+*.apk
+*.ap_
+*.aab
+*.dex
+
+# Signing keys and sensitive app config
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+google-services.json
+app/google-services.json
+secrets.properties
+keystore.properties
+
+# Runtime logs, crash dumps, profiling output
+*.log
+*.hprof
+*.trace
+*.prof
+hs_err_pid*
+java_pid*.hprof
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -30,6 +30,16 @@ data class CategorySummary(
     val previews: List<String>,
 )
 
+data class SearchableNote(
+    val rednoteId: String,
+    val categoryId: String,
+    val categoryName: String,
+    val title: String,
+    val desc: String,
+    val coverUrl: String,
+    val noteUrl: String,
+)
+
 data class PendingCategorySuggestion(
     val id: String,
     val rednoteIds: List<String>,
@@ -45,4 +55,3 @@ data class SyncedNote(
     val coverUrl: String,
     val noteUrl: String,
 )
-

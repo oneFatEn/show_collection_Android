@@ -1,5 +1,6 @@
 package com.jishi.collection.ui.components
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
@@ -18,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,12 +44,18 @@ fun CategoryListItem(
     category: CategorySummary,
     onOpen: () -> Unit,
     onEdit: () -> Unit,
+    highlighted: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
+    val rowBackground by animateColorAsState(
+        targetValue = if (highlighted) Color(0x1AD93025) else Color.Transparent,
+        label = "category-row-highlight",
+    )
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .background(rowBackground)
                 .clickable(onClick = onOpen)
                 .padding(horizontal = 24.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically,

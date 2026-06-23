@@ -17,6 +17,7 @@ class AppRepository(context: Context) {
         HomeData(
             categories = db.categorySummaries(),
             suggestions = db.pendingSuggestions(),
+            searchableNotes = db.searchableNotes(),
         )
     }
 
@@ -38,6 +39,10 @@ class AppRepository(context: Context) {
 
     suspend fun dismissSuggestion(id: String) = withContext(Dispatchers.IO) {
         db.dismissSuggestion(id)
+    }
+
+    suspend fun renameCategory(categoryId: String, name: String) = withContext(Dispatchers.IO) {
+        db.renameCategory(categoryId, name)
     }
 
     suspend fun clearMetadataCache() = withContext(Dispatchers.IO) {
@@ -161,4 +166,5 @@ class AppRepository(context: Context) {
 data class HomeData(
     val categories: List<CategorySummary>,
     val suggestions: List<PendingCategorySuggestion>,
+    val searchableNotes: List<SearchableNote>,
 )

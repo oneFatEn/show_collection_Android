@@ -1,5 +1,6 @@
 package com.jishi.collection.ui.components
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Divider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -26,11 +29,21 @@ import com.jishi.collection.NoteCard
 import com.jishi.collection.ui.theme.JiShiColors
 
 @Composable
-fun NoteListItem(note: NoteCard, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun NoteListItem(
+    note: NoteCard,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    highlighted: Boolean = false,
+) {
+    val rowBackground by animateColorAsState(
+        targetValue = if (highlighted) Color(0x1AD93025) else Color.Transparent,
+        label = "note-row-highlight",
+    )
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .background(rowBackground)
                 .clickable(onClick = onClick)
                 .padding(vertical = 12.dp),
         ) {
@@ -71,4 +84,3 @@ fun NoteListItem(note: NoteCard, onClick: () -> Unit, modifier: Modifier = Modif
         Divider(color = JiShiColors.Hairline, thickness = 0.6.dp)
     }
 }
-

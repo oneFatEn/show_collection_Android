@@ -27,6 +27,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     selectedCategoryName = home.categories.firstOrNull { category ->
                         category.id == it.selectedCategoryId
                     }?.name ?: it.selectedCategoryName,
@@ -45,6 +46,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     selectedCategoryId = category.id,
                     selectedCategoryName = category.name,
                     notes = notes,
+                    highlightedNoteId = null,
+                    message = null,
+                )
+            }
+        }
+    }
+
+    fun openSearchResult(categoryId: String, noteId: String?) {
+        viewModelScope.launch {
+            val category = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return@launch
+            val notes = repository.notesForCategory(category.id)
+            _uiState.update {
+                it.copy(
+                    screen = AppScreen.CategoryNotes,
+                    previousScreen = AppScreen.Home,
+                    selectedCategoryId = category.id,
+                    selectedCategoryName = category.name,
+                    notes = notes,
+                    highlightedNoteId = noteId,
                     message = null,
                 )
             }
@@ -52,8 +72,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun editCategory(categoryId: String) {
-        val categoryName = uiState.value.categories.firstOrNull { it.id == categoryId }?.name ?: "分类"
-        _uiState.update { it.copy(message = "分类编辑入口已预留：$categoryName") }
+        _uiState.update {
+            it.copy(
+                editingCategoryId = categoryId,
+                message = null,
+            )
+        }
+    }
+
+    fun dismissCategoryEditor() {
+        _uiState.update { it.copy(editingCategoryId = null) }
+    }
+
+    fun saveCategoryName(categoryId: String, name: String) {
+        viewModelScope.launch {
+            repository.renameCategory(categoryId, name)
+            val home = repository.loadHome()
+            _uiState.update {
+                it.copy(
+                    categories = home.categories,
+                    suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
+                    selectedCategoryName = home.categories.firstOrNull { category ->
+                        category.id == it.selectedCategoryId
+                    }?.name ?: it.selectedCategoryName,
+                    editingCategoryId = null,
+                    message = null,
+                )
+            }
+        }
     }
 
     fun startRednoteSync() {
@@ -79,6 +126,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isSyncing = false,
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     message = syncDoneMessage(message),
                 )
             }
@@ -95,6 +143,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isSyncing = false,
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     message = "已更新 +${result.inserted}",
                 )
             }
@@ -113,6 +162,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             isSyncing = hiddenSyncActive,
                             categories = home.categories,
                             suggestions = home.suggestions,
+                            searchableNotes = home.searchableNotes,
                             message = if (hiddenSyncActive) {
                                 "已入库 ${result.inserted} 条收藏，继续同步..."
                             } else {
@@ -141,6 +191,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     message = "已创建分类：$name",
                 )
             }
@@ -155,6 +206,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     message = "已保留在待整理",
                 )
             }
@@ -176,6 +228,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 AppUiState(
                     categories = home.categories,
                     suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
                     message = "已清除本地索引和分类关系",
                 )
             }
@@ -205,7 +258,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun go(screen: AppScreen) {
-        _uiState.update { it.copy(screen = screen, message = null) }
+        _uiState.update {
+            it.copy(
+                screen = screen,
+                previousScreen = if (screen.isTopLevel()) it.previousScreen else it.screen,
+                message = null,
+            )
+        }
+    }
+
+    fun back() {
+        _uiState.update {
+            it.copy(
+                screen = it.previousScreen ?: AppScreen.Home,
+                previousScreen = null,
+                message = null,
+            )
+        }
     }
 }
 
@@ -217,11 +286,15 @@ private fun syncDoneMessage(raw: String): String {
 
 data class AppUiState(
     val screen: AppScreen = AppScreen.Home,
+    val previousScreen: AppScreen? = null,
     val categories: List<CategorySummary> = emptyList(),
     val suggestions: List<PendingCategorySuggestion> = emptyList(),
+    val searchableNotes: List<SearchableNote> = emptyList(),
     val notes: List<NoteCard> = emptyList(),
     val selectedCategoryId: String? = null,
     val selectedCategoryName: String = "",
+    val highlightedNoteId: String? = null,
+    val editingCategoryId: String? = null,
     val isSyncing: Boolean = false,
     val rednoteSyncRequested: Boolean = false,
     val message: String? = null,
@@ -233,4 +306,8 @@ enum class AppScreen {
     Login,
     CategoryNotes,
     Settings,
+}
+
+private fun AppScreen.isTopLevel(): Boolean {
+    return this == AppScreen.Home || this == AppScreen.Profile
 }

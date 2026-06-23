@@ -215,6 +215,46 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         }
     }
 
+    fun searchableNotes(limit: Int = 500): List<SearchableNote> {
+        return readableDatabase.rawQuery(
+            """
+            SELECT n.rednote_id, c.id, c.name, m.title, m.desc, m.cover_url, n.note_url
+            FROM notes n
+            JOIN note_categories nc ON nc.note_id = n.rednote_id
+            JOIN categories c ON c.id = nc.category_id
+            LEFT JOIN note_metadata_cache m ON m.rednote_id = n.rednote_id
+            WHERE n.status = ?
+            ORDER BY n.last_seen_at DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf(NoteStatus.ACTIVE.name, limit.toString()),
+        ).useEach { cursor ->
+            SearchableNote(
+                rednoteId = cursor.getString(0),
+                categoryId = cursor.getString(1).orEmpty(),
+                categoryName = cursor.getString(2).orEmpty(),
+                title = cursor.getString(3).orEmpty().ifBlank { "未缓存标题" },
+                desc = cursor.getString(4).orEmpty(),
+                coverUrl = cursor.getString(5).orEmpty(),
+                noteUrl = cursor.getString(6).orEmpty(),
+            )
+        }
+    }
+
+    fun renameCategory(categoryId: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return
+        writableDatabase.update(
+            "categories",
+            ContentValues().apply {
+                put("name", trimmed)
+                put("updated_at", System.currentTimeMillis())
+            },
+            "id = ?",
+            arrayOf(categoryId),
+        )
+    }
+
     fun pendingSuggestions(): List<PendingCategorySuggestion> {
         return readableDatabase.rawQuery(
             """

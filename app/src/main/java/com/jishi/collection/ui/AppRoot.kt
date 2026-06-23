@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -19,8 +20,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -33,6 +36,7 @@ import androidx.compose.ui.unit.sp
 import com.jishi.collection.AppActions
 import com.jishi.collection.AppScreen
 import com.jishi.collection.AppUiState
+import com.jishi.collection.ui.components.CategoryEditDialog
 import com.jishi.collection.ui.components.TopTextButton
 import com.jishi.collection.ui.screens.HiddenRednoteSyncWebView
 import com.jishi.collection.ui.screens.HomeScreen
@@ -63,7 +67,7 @@ fun AppRoot(state: AppUiState, actions: AppActions) {
                     },
                     navigationIcon = {
                         TopTextButton(text = "返回") {
-                            actions.go(AppScreen.Home)
+                            actions.back()
                             actions.refreshHome()
                         }
                     },
@@ -72,7 +76,7 @@ fun AppRoot(state: AppUiState, actions: AppActions) {
             }
         },
         bottomBar = {
-            if (state.screen == AppScreen.Home || state.screen == AppScreen.Profile) {
+            if (state.editingCategoryId == null && (state.screen == AppScreen.Home || state.screen == AppScreen.Profile)) {
                 BottomTabs(
                     selected = state.screen,
                     onSelect = actions.go,
@@ -82,17 +86,27 @@ fun AppRoot(state: AppUiState, actions: AppActions) {
         containerColor = JiShiColors.Paper,
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
-            when (state.screen) {
-                AppScreen.Home -> HomeScreen(state, actions)
-                AppScreen.Profile -> ProfileScreen(state, actions)
-                AppScreen.Login -> LoginScreen(actions.syncFromJson)
-                AppScreen.CategoryNotes -> NotesScreen(state, actions.openNote)
-                AppScreen.Settings -> SettingsScreen(actions)
+            Box(modifier = if (state.editingCategoryId != null) Modifier.blur(16.dp) else Modifier) {
+                when (state.screen) {
+                    AppScreen.Home -> HomeScreen(state, actions)
+                    AppScreen.Profile -> ProfileScreen(state, actions)
+                    AppScreen.Login -> LoginScreen(actions.syncFromJson)
+                    AppScreen.CategoryNotes -> NotesScreen(state, actions.openNote)
+                    AppScreen.Settings -> SettingsScreen(actions)
+                }
             }
             if (state.rednoteSyncRequested) {
                 HiddenRednoteSyncWebView(
                     syncFromJson = actions.syncFromJson,
                     postStatus = actions.updateRednoteSyncStatus,
+                )
+            }
+            val editingCategory = state.categories.firstOrNull { it.id == state.editingCategoryId }
+            if (editingCategory != null) {
+                CategoryEditDialog(
+                    category = editingCategory,
+                    onDismiss = actions.dismissCategoryEditor,
+                    onSave = { name -> actions.saveCategoryName(editingCategory.id, name) },
                 )
             }
         }
@@ -149,7 +163,11 @@ private fun BottomTabItem(text: String, selected: Boolean, icon: BottomIcon, onC
     Column(
         modifier = Modifier
             .height(44.dp)
-            .clickable(onClick = onClick),
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            ),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {

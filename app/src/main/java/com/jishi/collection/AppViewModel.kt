@@ -58,13 +58,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startRednoteSync() {
         _uiState.update {
-            it.copy(
-                rednoteSyncRequested = true,
-                isSyncing = true,
-                message = "正在通过隐藏 WebView 同步小红书收藏...",
-            )
+                it.copy(
+                    rednoteSyncRequested = true,
+                    isSyncing = true,
+                    message = null,
+                )
+            }
         }
-    }
 
     fun updateRednoteSyncStatus(message: String, done: Boolean) {
         if (!done) {
@@ -79,7 +79,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isSyncing = false,
                     categories = home.categories,
                     suggestions = home.suggestions,
-                    message = message,
+                    message = syncDoneMessage(message),
                 )
             }
         }
@@ -95,7 +95,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isSyncing = false,
                     categories = home.categories,
                     suggestions = home.suggestions,
-                    message = "新增 ${result.inserted} 条收藏，待确认分类 ${home.suggestions.size} 组",
+                    message = "已更新 +${result.inserted}",
                 )
             }
         }
@@ -116,7 +116,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             message = if (hiddenSyncActive) {
                                 "已入库 ${result.inserted} 条收藏，继续同步..."
                             } else {
-                                "新增 ${result.inserted} 条收藏，待确认分类 ${home.suggestions.size} 组"
+                                "已更新 +${result.inserted}"
                             },
                         )
                     }
@@ -209,6 +209,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
+private fun syncDoneMessage(raw: String): String {
+    val count = Regex("""共读取\s*(\d+)\s*条""").find(raw)?.groupValues?.getOrNull(1)
+        ?: Regex("""(\d+)""").find(raw)?.groupValues?.getOrNull(1)
+    return if (count != null) "已更新 +$count" else "已更新"
+}
+
 data class AppUiState(
     val screen: AppScreen = AppScreen.Home,
     val categories: List<CategorySummary> = emptyList(),
@@ -223,8 +229,8 @@ data class AppUiState(
 
 enum class AppScreen {
     Home,
+    Profile,
     Login,
     CategoryNotes,
-    Suggestions,
     Settings,
 }

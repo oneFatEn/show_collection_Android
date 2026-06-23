@@ -34,7 +34,7 @@ import com.jishi.collection.ui.theme.JiShiColors
 @Composable
 fun SuggestionsScreen(state: AppUiState, actions: AppActions) {
     if (state.suggestions.isEmpty()) {
-        EmptyState("没有待确认分类", modifier = Modifier.fillMaxSize())
+        EmptyState("没有未分类内容", modifier = Modifier.fillMaxSize())
         return
     }
     JiShiLazyColumn(

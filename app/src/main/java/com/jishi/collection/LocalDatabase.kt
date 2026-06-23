@@ -180,13 +180,13 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 }
                 draft.count += 1
                 val coverUrl = cursor.getString(2).orEmpty()
-                if (draft.previews.size < 3) {
+                if (coverUrl.isNotBlank() && draft.previews.size < 3) {
                     draft.previews += coverUrl
                 }
             }
         }
         return summariesByCategory.values.map { draft ->
-            CategorySummary(draft.id, draft.name, draft.count, draft.previews.filter { it.isNotBlank() })
+            CategorySummary(draft.id, draft.name, draft.count, draft.previews)
         }
     }
 

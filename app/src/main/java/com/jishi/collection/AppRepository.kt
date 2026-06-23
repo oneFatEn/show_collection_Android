@@ -90,23 +90,66 @@ class AppRepository(context: Context) {
                         authorName = source.optJSONObject("user")?.optString("nickname")
                             ?: item.optJSONObject("user")?.optString("nickname")
                             ?: item.optString("authorName"),
-                        coverUrl = source.optJSONObject("cover")?.let { cover ->
-                            cover.optString("url_default")
-                                .ifBlank { cover.optString("url") }
-                                .ifBlank { cover.optString("url_pre") }
-                        }
-                            ?: item.optJSONObject("cover")?.let { cover ->
-                                cover.optString("url_default")
-                                    .ifBlank { cover.optString("url") }
-                                    .ifBlank { cover.optString("url_pre") }
-                            }
-                            ?: source.optJSONArray("image_list")?.optJSONObject(0)?.optString("url")
-                            ?: item.optJSONArray("image_list")?.optJSONObject(0)?.optString("url")
-                            ?: item.optString("coverUrl"),
+                        coverUrl = extractCoverUrl(source)
+                            .ifBlank { extractCoverUrl(item) }
+                            .ifBlank { normalizeImageUrl(item.optString("coverUrl")) },
                         noteUrl = item.optString("noteUrl").ifBlank { "https://www.xiaohongshu.com/explore/$id" },
                     ),
                 )
             }
+        }
+    }
+
+    private fun extractCoverUrl(source: JSONObject): String {
+        return source.optJSONObject("cover")?.let(::extractImageUrl).orEmpty()
+            .ifBlank { source.optJSONArray("image_list")?.optJSONObject(0)?.let(::extractImageUrl).orEmpty() }
+            .ifBlank { source.optJSONArray("images_list")?.optJSONObject(0)?.let(::extractImageUrl).orEmpty() }
+            .ifBlank { source.optJSONArray("images")?.optJSONObject(0)?.let(::extractImageUrl).orEmpty() }
+    }
+
+    private fun extractImageUrl(image: JSONObject): String {
+        val directUrl = directImageUrl(image)
+        if (directUrl.isNotBlank()) return directUrl
+
+        val infoList = image.optJSONArray("info_list")
+            ?: image.optJSONArray("url_list")
+            ?: image.optJSONArray("urls")
+        if (infoList != null) {
+            for (index in 0 until infoList.length()) {
+                val candidate = when (val item = infoList.opt(index)) {
+                    is JSONObject -> directImageUrl(item)
+                    is String -> normalizeImageUrl(item)
+                    else -> ""
+                }
+                if (candidate.isNotBlank()) return candidate
+            }
+        }
+
+        return ""
+    }
+
+    private fun directImageUrl(image: JSONObject): String {
+        return listOf(
+            "url_default",
+            "url_pre",
+            "url",
+            "original",
+            "thumbnail",
+            "trace_url",
+            "file_id",
+        ).firstNotNullOfOrNull { key ->
+            normalizeImageUrl(image.optString(key)).takeIf { it.isNotBlank() }
+        }.orEmpty()
+    }
+
+    private fun normalizeImageUrl(raw: String): String {
+        val value = raw.trim()
+        if (value.isBlank()) return ""
+        return when {
+            value.startsWith("//") -> "https:$value"
+            value.startsWith("http://") -> value.replaceFirst("http://", "https://")
+            value.startsWith("https://") -> value
+            else -> ""
         }
     }
 

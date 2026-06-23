@@ -104,14 +104,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startRednoteSync() {
-        _uiState.update {
+        if (!repository.hasRednoteLoginState()) {
+            _uiState.update {
                 it.copy(
+                    screen = AppScreen.Login,
+                    previousScreen = it.screen,
+                    pendingSyncAfterLogin = true,
+                    rednoteSyncRequested = false,
+                    isSyncing = false,
+                    message = "请先登录小红书，登录成功后会自动同步收藏",
+                )
+            }
+            return
+        }
+        _uiState.update {
+            it.copy(
+                rednoteSyncRequested = true,
+                isSyncing = true,
+                message = null,
+            )
+        }
+    }
+
+    fun onRednoteLoginReady() {
+        _uiState.update {
+            if (it.pendingSyncAfterLogin) {
+                it.copy(
+                    screen = AppScreen.Home,
+                    previousScreen = null,
+                    pendingSyncAfterLogin = false,
                     rednoteSyncRequested = true,
                     isSyncing = true,
-                    message = null,
+                    message = "登录成功，正在同步收藏...",
+                )
+            } else {
+                it.copy(
+                    screen = it.previousScreen ?: AppScreen.Profile,
+                    previousScreen = null,
+                    pendingSyncAfterLogin = false,
+                    message = "小红书登录态已就绪",
                 )
             }
         }
+    }
 
     fun updateRednoteSyncStatus(message: String, done: Boolean) {
         if (!done) {
@@ -236,13 +271,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearWebLoginState() {
-        repository.clearWebLoginState()
-        _uiState.update {
-            it.copy(
-                rednoteSyncRequested = false,
-                isSyncing = false,
-                message = "已清除 WebView 登录态和小红书签名本地数据",
-            )
+        viewModelScope.launch {
+            repository.clearWebLoginState()
+            repository.clearAllLocalData()
+            val home = repository.loadHome()
+            _uiState.update {
+                AppUiState(
+                    screen = AppScreen.Home,
+                    categories = home.categories,
+                    suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
+                    message = "已退出登录，并清空本地收藏索引",
+                )
+            }
         }
     }
 
@@ -297,6 +338,7 @@ data class AppUiState(
     val editingCategoryId: String? = null,
     val isSyncing: Boolean = false,
     val rednoteSyncRequested: Boolean = false,
+    val pendingSyncAfterLogin: Boolean = false,
     val message: String? = null,
 )
 

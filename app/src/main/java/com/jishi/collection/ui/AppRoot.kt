@@ -90,7 +90,10 @@ fun AppRoot(state: AppUiState, actions: AppActions) {
                 when (state.screen) {
                     AppScreen.Home -> HomeScreen(state, actions)
                     AppScreen.Profile -> ProfileScreen(state, actions)
-                    AppScreen.Login -> LoginScreen(actions.syncFromJson)
+                    AppScreen.Login -> LoginScreen(
+                        syncFromJson = actions.syncFromJson,
+                        onLoginReady = actions.onRednoteLoginReady,
+                    )
                     AppScreen.CategoryNotes -> NotesScreen(state, actions.openNote)
                     AppScreen.Settings -> SettingsScreen(actions)
                 }

@@ -53,6 +53,20 @@ class AppRepository(context: Context) {
         db.clearAllLocalData()
     }
 
+    fun hasRednoteLoginState(): Boolean {
+        val hosts = listOf(
+            "https://www.xiaohongshu.com",
+            "https://edith.xiaohongshu.com",
+            "https://www.rednote.com",
+        )
+        return hosts
+            .asSequence()
+            .mapNotNull { CookieManager.getInstance().getCookie(it) }
+            .flatMap { it.split(";").asSequence() }
+            .map { it.trim() }
+            .any { it.startsWith("a1=") && it.length > "a1=".length }
+    }
+
     fun clearWebLoginState() {
         CookieManager.getInstance().removeAllCookies {
             CookieManager.getInstance().removeSessionCookies {

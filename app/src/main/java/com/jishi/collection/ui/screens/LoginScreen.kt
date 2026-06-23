@@ -38,12 +38,24 @@ import com.jishi.collection.ui.theme.JiShiColors
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun LoginScreen(syncFromJson: (String) -> Unit) {
+fun LoginScreen(
+    syncFromJson: (String) -> Unit,
+    onLoginReady: () -> Unit,
+) {
     val context = LocalContext.current
     var loginDetected by remember { mutableStateOf(false) }
+    var loginHandled by remember { mutableStateOf(false) }
     var cookieHint by remember { mutableStateOf("等待小红书页面登录") }
     var webView by remember { mutableStateOf<WebView?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    fun handleLoginReady(message: String) {
+        if (loginHandled) return
+        loginHandled = true
+        loginDetected = true
+        cookieHint = message
+        onLoginReady()
+    }
 
     Column(
         modifier = Modifier
@@ -69,11 +81,12 @@ fun LoginScreen(syncFromJson: (String) -> Unit) {
                 lineHeight = 19.sp,
             )
             Spacer(Modifier.height(12.dp))
-            MessageBar(if (loginDetected) "登录态已就绪。返回首页后点击同步，会在后台获取收藏。" else cookieHint)
+            MessageBar(if (loginDetected) "登录态已就绪，正在关闭登录页。" else cookieHint)
             Spacer(Modifier.height(8.dp))
             OutlinedButton(
                 onClick = {
                     loginDetected = false
+                    loginHandled = false
                     cookieHint = "正在清除 WebView 登录态..."
                     clearRednoteWebLoginState(webView) {
                         cookieHint = "登录态已清除，请重新登录"
@@ -99,8 +112,7 @@ fun LoginScreen(syncFromJson: (String) -> Unit) {
                         override fun onPageFinished(view: WebView, url: String) {
                             cookieHint = "正在确认登录状态..."
                             if (hasRednoteLoginCookie()) {
-                                loginDetected = true
-                                cookieHint = "已根据 WebView Cookie 确认小红书登录态"
+                                handleLoginReady("已根据 WebView Cookie 确认小红书登录态")
                                 return
                             }
                             view.evaluateJavascript(LOGIN_CHECK_SCRIPT, null)
@@ -115,12 +127,13 @@ fun LoginScreen(syncFromJson: (String) -> Unit) {
                             syncFromJson = syncFromJson,
                             postLoginStatus = { loggedIn, message ->
                                 mainHandler.post {
-                                    if (loggedIn || !hasRednoteLoginCookie()) {
-                                        loginDetected = loggedIn
+                                    if (loggedIn) {
+                                        handleLoginReady(message)
+                                    } else if (!hasRednoteLoginCookie()) {
+                                        loginDetected = false
                                         cookieHint = message
                                     } else {
-                                        loginDetected = true
-                                        cookieHint = "已根据 WebView Cookie 确认小红书登录态"
+                                        handleLoginReady("已根据 WebView Cookie 确认小红书登录态")
                                     }
                                 }
                             },

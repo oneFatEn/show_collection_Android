@@ -28,7 +28,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             CREATE TABLE note_metadata_cache (
                 rednote_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
-                desc TEXT NOT NULL,
+                description TEXT NOT NULL,
                 author_name TEXT NOT NULL,
                 cover_url TEXT NOT NULL,
                 cached_at INTEGER NOT NULL,
@@ -118,6 +118,9 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             if (count == 0L) {
                 db.insert("categories", categoryValues(Category(CATEGORY_INVALID, "失效收藏", "system", 10_000), now))
             }
+        }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE note_metadata_cache RENAME COLUMN \"desc\" TO description")
         }
     }
 
@@ -284,7 +287,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         val statusArg = if (categoryId == CATEGORY_INVALID) NoteStatus.ACTIVE.name else NoteStatus.ACTIVE.name
         return readableDatabase.rawQuery(
             """
-            SELECT n.rednote_id, nc.category_id, m.title, m.desc, m.author_name, m.cover_url, n.note_url
+            SELECT n.rednote_id, nc.category_id, m.title, m.description, m.author_name, m.cover_url, n.note_url
             FROM note_categories nc
             JOIN notes n ON n.rednote_id = nc.note_id
             LEFT JOIN note_metadata_cache m ON m.rednote_id = n.rednote_id
@@ -309,7 +312,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     fun searchableNotes(limit: Int = 500): List<SearchableNote> {
         return readableDatabase.rawQuery(
             """
-            SELECT n.rednote_id, c.id, c.name, m.title, m.desc, m.cover_url, n.note_url
+            SELECT n.rednote_id, c.id, c.name, m.title, m.description, m.cover_url, n.note_url
             FROM notes n
             JOIN note_categories nc ON nc.note_id = n.rednote_id
             JOIN categories c ON c.id = nc.category_id
@@ -618,7 +621,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         return ContentValues().apply {
             put("rednote_id", note.rednoteId)
             put("title", note.title)
-            put("desc", note.desc)
+            put("description", note.desc)
             put("author_name", note.authorName)
             put("cover_url", note.coverUrl)
             put("cached_at", now)
@@ -644,7 +647,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
 
     companion object {
         private const val DB_NAME = "jishi_local.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
         private const val METADATA_TTL_MS = 30L * 24L * 60L * 60L * 1000L
         private const val DEFAULT_ACCOUNT_ID = "current"
 

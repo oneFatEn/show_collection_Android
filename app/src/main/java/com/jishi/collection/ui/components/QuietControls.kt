@@ -188,9 +188,14 @@ fun SyncStatusButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val done = text.startsWith("已更新")
-    val secondaryText = if (done) text.removePrefix("已更新").trim().takeIf { it.isNotBlank() } else null
-    val primaryText = if (done) "已更新" else text
+    val done = text.startsWith("已更新") || text.startsWith("已同步")
+    val donePrefix = when {
+        text.startsWith("已同步") -> "已同步"
+        text.startsWith("已更新") -> "已更新"
+        else -> ""
+    }
+    val secondaryText = if (done) text.removePrefix(donePrefix).trim().takeIf { it.isNotBlank() } else null
+    val primaryText = if (done) donePrefix else text
     val transition = rememberInfiniteTransition(label = "sync_rotation")
     val rotation by transition.animateFloat(
         initialValue = 0f,

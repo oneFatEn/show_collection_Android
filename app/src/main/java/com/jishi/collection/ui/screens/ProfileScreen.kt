@@ -56,6 +56,7 @@ fun ProfileScreen(state: AppUiState, actions: AppActions) {
 private fun isSyncDisplayMessage(message: String): Boolean {
     if (message.startsWith("同步失败")) return false
     return message.startsWith("已更新") ||
+        message.startsWith("已同步") ||
         message.startsWith("正在") ||
         message.contains("同步") ||
         message.contains("WebView") ||

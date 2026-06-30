@@ -26,6 +26,7 @@ class MainActivity : ComponentActivity() {
                         startRednoteSync = viewModel::startRednoteSync,
                         onRednoteLoginReady = viewModel::onRednoteLoginReady,
                         updateRednoteSyncStatus = viewModel::updateRednoteSyncStatus,
+                        completeRednoteSync = viewModel::completeRednoteSync,
                         syncDemo = viewModel::syncDemo,
                         syncFromJson = viewModel::syncFromJson,
                         openCategory = viewModel::openCategory,
@@ -39,6 +40,7 @@ class MainActivity : ComponentActivity() {
                         clearWebLoginState = viewModel::clearWebLoginState,
                         clearMetadataCache = viewModel::clearMetadataCache,
                         clearAllLocalData = viewModel::clearAllLocalData,
+                        clearInvalidNotes = viewModel::clearInvalidNotes,
                     ),
                 )
             }
@@ -53,6 +55,7 @@ data class AppActions(
     val startRednoteSync: () -> Unit,
     val onRednoteLoginReady: () -> Unit,
     val updateRednoteSyncStatus: (String, Boolean) -> Unit,
+    val completeRednoteSync: (String) -> Unit,
     val syncDemo: () -> Unit,
     val syncFromJson: (String) -> Unit,
     val openCategory: (CategorySummary) -> Unit,
@@ -66,4 +69,5 @@ data class AppActions(
     val clearWebLoginState: () -> Unit,
     val clearMetadataCache: () -> Unit,
     val clearAllLocalData: () -> Unit,
+    val clearInvalidNotes: () -> Unit,
 )

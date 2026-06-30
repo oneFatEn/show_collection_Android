@@ -94,7 +94,11 @@ fun AppRoot(state: AppUiState, actions: AppActions) {
                         syncFromJson = actions.syncFromJson,
                         onLoginReady = actions.onRednoteLoginReady,
                     )
-                    AppScreen.CategoryNotes -> NotesScreen(state, actions.openNote)
+                    AppScreen.CategoryNotes -> NotesScreen(
+                        state = state,
+                        openNote = actions.openNote,
+                        clearInvalidNotes = actions.clearInvalidNotes,
+                    )
                     AppScreen.Settings -> SettingsScreen(actions)
                 }
             }
@@ -102,6 +106,7 @@ fun AppRoot(state: AppUiState, actions: AppActions) {
                 HiddenRednoteSyncWebView(
                     syncFromJson = actions.syncFromJson,
                     postStatus = actions.updateRednoteSyncStatus,
+                    completeSync = actions.completeRednoteSync,
                 )
             }
             val editingCategory = state.categories.firstOrNull { it.id == state.editingCategoryId }

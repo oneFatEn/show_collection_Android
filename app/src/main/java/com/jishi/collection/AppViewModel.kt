@@ -121,6 +121,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 rednoteSyncRequested = true,
                 isSyncing = true,
+                syncStartActiveCount = it.activeCategoryCount(),
                 message = null,
             )
         }
@@ -135,11 +136,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     pendingSyncAfterLogin = false,
                     rednoteSyncRequested = true,
                     isSyncing = true,
+                    syncStartActiveCount = it.activeCategoryCount(),
                     message = "登录成功，正在同步收藏...",
                 )
             } else {
                 it.copy(
-                    screen = it.previousScreen ?: AppScreen.Profile,
+                    screen = AppScreen.Home,
                     previousScreen = null,
                     pendingSyncAfterLogin = false,
                     message = "小红书登录态已就绪",
@@ -153,16 +155,36 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isSyncing = true, message = message) }
             return
         }
+        if (message.requiresRednoteLogin()) {
+            _uiState.update {
+                it.copy(
+                    screen = AppScreen.Login,
+                    previousScreen = AppScreen.Home,
+                    pendingSyncAfterLogin = true,
+                    rednoteSyncRequested = false,
+                    isSyncing = false,
+                    message = "请先登录小红书，登录成功后会自动同步收藏",
+                )
+            }
+            return
+        }
         viewModelScope.launch {
             val home = repository.loadHome()
             _uiState.update {
+                if (!it.rednoteSyncRequested) {
+                    return@update it.copy(
+                        categories = home.categories,
+                        suggestions = home.suggestions,
+                        searchableNotes = home.searchableNotes,
+                    )
+                }
                 it.copy(
                     rednoteSyncRequested = false,
                     isSyncing = false,
                     categories = home.categories,
                     suggestions = home.suggestions,
                     searchableNotes = home.searchableNotes,
-                    message = syncDoneMessage(message),
+                    message = syncDoneMessage(message, home.categories.sumOf { category -> category.count }),
                 )
             }
         }
@@ -186,19 +208,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun syncFromJson(json: String) {
+        val fromHiddenSync = _uiState.value.rednoteSyncRequested
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true, message = "收到 WebView 收藏数据，正在入库...") }
             runCatching { repository.syncFromJson(json) }
                 .onSuccess { result ->
                     val home = repository.loadHome()
                     _uiState.update {
-                        val hiddenSyncActive = it.rednoteSyncRequested
+                        if (fromHiddenSync && !it.rednoteSyncRequested) {
+                            return@update it.copy(
+                                categories = home.categories,
+                                suggestions = home.suggestions,
+                                searchableNotes = home.searchableNotes,
+                            )
+                        }
                         it.copy(
-                            isSyncing = hiddenSyncActive,
+                            isSyncing = fromHiddenSync,
                             categories = home.categories,
                             suggestions = home.suggestions,
                             searchableNotes = home.searchableNotes,
-                            message = if (hiddenSyncActive) {
+                            message = if (fromHiddenSync) {
                                 "已入库 ${result.inserted} 条收藏，继续同步..."
                             } else {
                                 "已更新 +${result.inserted}"
@@ -212,6 +241,53 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             rednoteSyncRequested = false,
                             isSyncing = false,
                             message = "同步失败：${error.message ?: "数据格式异常"}",
+                        )
+                    }
+                }
+        }
+    }
+
+    fun completeRednoteSync(json: String) {
+        viewModelScope.launch {
+            runCatching { repository.completeSync(json) }
+                .onSuccess { result ->
+                    val home = repository.loadHome()
+                    _uiState.update {
+                        if (!result.success && result.message.requiresRednoteLogin()) {
+                            return@update it.copy(
+                                screen = AppScreen.Login,
+                                previousScreen = AppScreen.Home,
+                                pendingSyncAfterLogin = true,
+                                rednoteSyncRequested = false,
+                                isSyncing = false,
+                                categories = home.categories,
+                                suggestions = home.suggestions,
+                                searchableNotes = home.searchableNotes,
+                                message = "请先登录小红书，登录成功后会自动同步收藏",
+                            )
+                        }
+                        val netChange = home.categories.activeCount() - it.syncStartActiveCount
+                        it.copy(
+                            rednoteSyncRequested = false,
+                            isSyncing = false,
+                            syncStartActiveCount = home.categories.activeCount(),
+                            categories = home.categories,
+                            suggestions = home.suggestions,
+                            searchableNotes = home.searchableNotes,
+                            message = if (result.success) {
+                                syncNetMessage(netChange)
+                            } else {
+                                "同步失败：${result.message}"
+                            },
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            rednoteSyncRequested = false,
+                            isSyncing = false,
+                            message = "同步状态保存失败：${error.message ?: "未知错误"}",
                         )
                     }
                 }
@@ -270,6 +346,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun clearInvalidNotes() {
+        viewModelScope.launch {
+            val deleted = repository.clearInvalidNotes()
+            val home = repository.loadHome()
+            _uiState.update {
+                it.copy(
+                    screen = AppScreen.Home,
+                    previousScreen = null,
+                    categories = home.categories,
+                    suggestions = home.suggestions,
+                    searchableNotes = home.searchableNotes,
+                    notes = emptyList(),
+                    selectedCategoryId = null,
+                    selectedCategoryName = "",
+                    message = "已清理 $deleted 条失效收藏",
+                )
+            }
+        }
+    }
+
     fun clearWebLoginState() {
         viewModelScope.launch {
             repository.clearWebLoginState()
@@ -319,10 +415,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
-private fun syncDoneMessage(raw: String): String {
+private fun syncDoneMessage(raw: String, fallbackTotal: Int): String {
+    if (raw.startsWith("同步失败")) return raw
+    if (raw.requiresRednoteLogin()) return raw
     val count = Regex("""共读取\s*(\d+)\s*条""").find(raw)?.groupValues?.getOrNull(1)
         ?: Regex("""(\d+)""").find(raw)?.groupValues?.getOrNull(1)
-    return if (count != null) "已更新 +$count" else "已更新"
+    return "已同步 ${count ?: fallbackTotal}"
+}
+
+private fun syncNetMessage(netChange: Int): String {
+    val sign = if (netChange > 0) "+" else ""
+    return "已同步 $sign$netChange"
+}
+
+private fun AppUiState.activeCategoryCount(): Int {
+    return categories.activeCount()
+}
+
+private fun List<CategorySummary>.activeCount(): Int {
+    return filterNot { it.isInvalid }.sumOf { it.count }
+}
+
+private fun String.requiresRednoteLogin(): Boolean {
+    return contains("未检测到小红书登录态") ||
+        contains("请先登录") ||
+        contains("未获取到 user_id") ||
+        contains("登录态")
 }
 
 data class AppUiState(
@@ -339,6 +457,7 @@ data class AppUiState(
     val isSyncing: Boolean = false,
     val rednoteSyncRequested: Boolean = false,
     val pendingSyncAfterLogin: Boolean = false,
+    val syncStartActiveCount: Int = 0,
     val message: String? = null,
 )
 

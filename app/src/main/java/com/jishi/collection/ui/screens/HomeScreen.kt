@@ -185,17 +185,21 @@ private fun syncButtonText(state: AppUiState): String {
     val message = state.message.orEmpty()
     return when {
         state.isSyncing -> "同步中"
-        message.startsWith("已更新") -> message
+        isSyncDoneMessage(message) -> message
         else -> "同步"
     }
 }
 
 private fun isSyncDisplayMessage(message: String): Boolean {
     if (message.startsWith("同步失败")) return false
-    return message.startsWith("已更新") ||
+    return isSyncDoneMessage(message) ||
         message.startsWith("正在") ||
         message.contains("同步") ||
         message.contains("WebView") ||
         message.contains("获取") ||
         message.contains("入库")
+}
+
+private fun isSyncDoneMessage(message: String): Boolean {
+    return message.startsWith("已更新") || message.startsWith("已同步")
 }

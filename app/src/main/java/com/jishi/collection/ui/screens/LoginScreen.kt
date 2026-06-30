@@ -111,10 +111,6 @@ fun LoginScreen(
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView, url: String) {
                             cookieHint = "正在确认登录状态..."
-                            if (hasRednoteLoginCookie()) {
-                                handleLoginReady("已根据 WebView Cookie 确认小红书登录态")
-                                return
-                            }
                             view.evaluateJavascript(LOGIN_CHECK_SCRIPT, null)
                             view.postDelayed({ view.evaluateJavascript(LOGIN_CHECK_SCRIPT, null) }, 1200)
                             view.postDelayed({ view.evaluateJavascript(LOGIN_CHECK_SCRIPT, null) }, 3000)
@@ -129,11 +125,9 @@ fun LoginScreen(
                                 mainHandler.post {
                                     if (loggedIn) {
                                         handleLoginReady(message)
-                                    } else if (!hasRednoteLoginCookie()) {
+                                    } else {
                                         loginDetected = false
                                         cookieHint = message
-                                    } else {
-                                        handleLoginReady("已根据 WebView Cookie 确认小红书登录态")
                                     }
                                 }
                             },
@@ -183,6 +177,7 @@ private fun clearRednoteWebLoginState(webView: WebView?, onDone: () -> Unit) {
 fun HiddenRednoteSyncWebView(
     syncFromJson: (String) -> Unit,
     postStatus: (String, Boolean) -> Unit,
+    completeSync: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -202,7 +197,7 @@ fun HiddenRednoteSyncWebView(
                     override fun onPageFinished(view: WebView, url: String) {
                         if (started) return
                         started = true
-                        if (!hasRednoteLoginCookie()) {
+                        if (!hasLikelyRednoteAuthCookie()) {
                             postStatus("未检测到小红书登录态，请先进入登录页完成登录", true)
                             return
                         }
@@ -214,6 +209,7 @@ fun HiddenRednoteSyncWebView(
                 addJavascriptInterface(
                     RednoteBridge(
                         syncFromJson = syncFromJson,
+                        completeSync = completeSync,
                         postLoginStatus = { _, _ -> },
                         postStatus = { message, done ->
                             mainHandler.post { postStatus(message, done) }
@@ -227,7 +223,7 @@ fun HiddenRednoteSyncWebView(
     )
 }
 
-private fun hasRednoteLoginCookie(): Boolean {
+private fun hasLikelyRednoteAuthCookie(): Boolean {
     val cookieManager = CookieManager.getInstance()
     val hosts = listOf(
         "https://www.xiaohongshu.com",
@@ -239,11 +235,18 @@ private fun hasRednoteLoginCookie(): Boolean {
         .mapNotNull { cookieManager.getCookie(it) }
         .flatMap { it.split(";").asSequence() }
         .map { it.trim() }
-        .any { it.startsWith("a1=") && it.length > "a1=".length }
+        .any { cookie ->
+            AUTH_COOKIE_NAMES.any { name ->
+                cookie.startsWith("$name=") && cookie.length > "$name=".length
+            }
+        }
 }
+
+private val AUTH_COOKIE_NAMES = listOf("web_session")
 
 private class RednoteBridge(
     private val syncFromJson: (String) -> Unit,
+    private val completeSync: (String) -> Unit = {},
     private val postLoginStatus: (Boolean, String) -> Unit,
     private val postStatus: (String, Boolean) -> Unit,
 ) {
@@ -257,6 +260,13 @@ private class RednoteBridge(
     @JavascriptInterface
     fun postSyncStatus(message: String, done: Boolean) {
         postStatus(message, done)
+    }
+
+    @JavascriptInterface
+    fun postSyncComplete(json: String) {
+        if (json.length <= 2_000_000) {
+            completeSync(json)
+        }
     }
 
     @JavascriptInterface
@@ -508,12 +518,15 @@ private val COLLECT_SYNC_SCRIPT = """
         if (Array.isArray(data.collects)) return data.collects;
         return [];
       };
+      let currentUserId = '';
       try {
         notify('正在获取当前用户...');
         const userId = await getUserId();
+        currentUserId = userId;
         let cursor = '';
         let page = 0;
         let total = 0;
+        const syncedIds = [];
         let hasMore = true;
         const maxPages = 200;
         while (hasMore && page < maxPages) {
@@ -532,17 +545,37 @@ private val COLLECT_SYNC_SCRIPT = """
           const data = json.data || {};
           const notes = extractNotes(data);
           total += notes.length;
-          if (notes.length > 0) {
-            bridge.postFavoritesJson(JSON.stringify({ notes }));
-          }
           cursor = data.cursor || '';
           hasMore = Boolean(data.has_more);
+          notes.forEach((item) => {
+            const card = item && item.note_card || {};
+            const id = item && (item.id || item.note_id || item.rednoteId) || card.note_id || '';
+            if (id) syncedIds.push(String(id));
+          });
+          bridge.postFavoritesJson(JSON.stringify({
+            notes,
+            sync: { accountUserId: userId, cursor, hasMore, page }
+          }));
           if (!notes.length && !hasMore) break;
         }
+        bridge.postSyncComplete(JSON.stringify({
+          success: true,
+          userId,
+          ids: Array.from(new Set(syncedIds)),
+          total,
+          message: '真实收藏同步完成'
+        }));
         notify('真实收藏同步完成，共读取 ' + total + ' 条。返回首页查看分类。', true);
         return JSON.stringify({ ok: true, total });
       } catch (error) {
-        notify('同步失败：' + String(error && error.message || error), true);
+        const message = '同步失败：' + String(error && error.message || error);
+        bridge.postSyncComplete(JSON.stringify({
+          success: false,
+          userId: currentUserId,
+          ids: [],
+          message
+        }));
+        notify(message, true);
         return JSON.stringify({ ok: false, error: String(error && error.message || error) });
       }
     })();

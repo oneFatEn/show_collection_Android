@@ -28,7 +28,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             CREATE TABLE note_metadata_cache (
                 rednote_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
-                desc TEXT NOT NULL,
+                description TEXT NOT NULL,
                 author_name TEXT NOT NULL,
                 cover_url TEXT NOT NULL,
                 cached_at INTEGER NOT NULL,
@@ -79,46 +79,89 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             """.trimIndent(),
         )
         db.execSQL("CREATE INDEX idx_suggestions_status ON pending_category_suggestions(status)")
+
+        db.execSQL(
+            """
+            CREATE TABLE sync_state (
+                account_user_id TEXT PRIMARY KEY,
+                cursor TEXT NOT NULL,
+                has_more INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                last_error TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS pending_category_suggestions")
-        db.execSQL("DROP TABLE IF EXISTS note_categories")
-        db.execSQL("DROP TABLE IF EXISTS categories")
-        db.execSQL("DROP TABLE IF EXISTS note_metadata_cache")
-        db.execSQL("DROP TABLE IF EXISTS notes")
-        onCreate(db)
+        if (oldVersion < 3) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS sync_state (
+                    account_user_id TEXT PRIMARY KEY,
+                    cursor TEXT NOT NULL,
+                    has_more INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    last_error TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """.trimIndent(),
+            )
+            val now = System.currentTimeMillis()
+            val count = db.rawQuery(
+                "SELECT COUNT(*) FROM categories WHERE id = ?",
+                arrayOf(CATEGORY_INVALID),
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+            }
+            if (count == 0L) {
+                db.insert("categories", categoryValues(Category(CATEGORY_INVALID, "失效收藏", "system", 10_000), now))
+            }
+        }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE note_metadata_cache RENAME COLUMN \"desc\" TO description")
+        }
     }
 
     fun ensureDefaults() {
         writableDatabase.transaction {
-            if (longFor("SELECT COUNT(*) FROM categories") == 0L) {
-                val now = System.currentTimeMillis()
-                listOf(
-                    Category(CATEGORY_FOOD, "美食", "system", 10),
-                    Category(CATEGORY_TRAVEL, "旅行", "system", 20),
-                    Category(CATEGORY_STUDY, "学习", "system", 30),
-                    Category(CATEGORY_OUTFIT, "穿搭", "system", 40),
-                    Category(CATEGORY_GIFT, "礼物", "system", 50),
-                    Category(CATEGORY_PENDING, "待整理", "system", 999),
-                ).forEach { category ->
+            val now = System.currentTimeMillis()
+            listOf(
+                Category(CATEGORY_FOOD, "美食", "system", 10),
+                Category(CATEGORY_TRAVEL, "旅行", "system", 20),
+                Category(CATEGORY_STUDY, "学习", "system", 30),
+                Category(CATEGORY_OUTFIT, "穿搭", "system", 40),
+                Category(CATEGORY_GIFT, "礼物", "system", 50),
+                Category(CATEGORY_PENDING, "待整理", "system", 999),
+                Category(CATEGORY_INVALID, "失效收藏", "system", 10_000),
+            ).forEach { category ->
+                if (longFor("SELECT COUNT(*) FROM categories WHERE id = ?", category.id) == 0L) {
                     insert("categories", categoryValues(category, now))
                 }
             }
         }
     }
 
-    fun syncNotes(notes: List<SyncedNote>, reconcileMissing: Boolean = false): SyncResult {
+    fun syncNotes(notes: List<SyncedNote>, pageState: SyncPageState? = null): SyncResult {
         ensureDefaults()
-        if (notes.isEmpty()) return SyncResult(0, 0)
+        if (notes.isEmpty()) {
+            pageState?.let { state ->
+                writableDatabase.transaction { recordSyncPage(state) }
+            }
+            return SyncResult(0, 0, emptySet(), pageState?.accountUserId)
+        }
         val now = System.currentTimeMillis()
         val incomingIds = notes.map { it.rednoteId }.toSet()
         var inserted = 0
         var pendingGroups = 0
 
         writableDatabase.transaction {
+            pageState?.let { recordSyncPage(it) }
             notes.forEach { note ->
-                val isNew = longFor("SELECT COUNT(*) FROM notes WHERE rednote_id = ?", note.rednoteId) == 0L
+                val existingStatus = stringFor("SELECT status FROM notes WHERE rednote_id = ?", note.rednoteId)
+                val isNew = existingStatus == null
+                val wasInvalid = existingStatus == NoteStatus.REMOVED.name || existingStatus == NoteStatus.UNAVAILABLE.name
                 val noteValues = ContentValues().apply {
                     put("rednote_id", note.rednoteId)
                     put("note_url", note.noteUrl)
@@ -132,11 +175,17 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     inserted += 1
                 } else {
                     update("notes", noteValues, "rednote_id = ?", arrayOf(note.rednoteId))
+                    if (wasInvalid) {
+                        inserted += 1
+                    }
                 }
 
                 replace("note_metadata_cache", metadataValues(note, now))
 
-                if (isNew) {
+                if (isNew || wasInvalid) {
+                    if (wasInvalid) {
+                        delete("note_categories", "note_id = ? AND category_id = ?", arrayOf(note.rednoteId, CATEGORY_INVALID))
+                    }
                     val match = classify(note)
                     if (match.categoryId != null) {
                         replace("note_categories", noteCategoryValues(note.rednoteId, match.categoryId, "rule", match.confidence, false))
@@ -147,12 +196,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     }
                 }
             }
-
-            if (reconcileMissing) {
-                markMissingAsRemoved(incomingIds, now)
-            }
         }
-        return SyncResult(inserted, pendingGroups)
+        return SyncResult(inserted, pendingGroups, incomingIds, pageState?.accountUserId)
     }
 
     fun categorySummaries(): List<CategorySummary> {
@@ -165,10 +210,10 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             JOIN note_categories nc ON nc.category_id = c.id
             JOIN notes n ON n.rednote_id = nc.note_id
             LEFT JOIN note_metadata_cache m ON m.rednote_id = nc.note_id
-            WHERE n.status = ?
+            WHERE n.status = ? AND c.id != ?
             ORDER BY c.sort_order ASC, c.name ASC, n.last_seen_at DESC
             """.trimIndent(),
-            arrayOf(NoteStatus.ACTIVE.name),
+            arrayOf(NoteStatus.ACTIVE.name, CATEGORY_INVALID),
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 val categoryId = cursor.getString(0)
@@ -185,23 +230,72 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 }
             }
         }
-        return summariesByCategory.values.map { draft ->
-            CategorySummary(draft.id, draft.name, draft.count, draft.previews)
+        val summaries = summariesByCategory.values.map { draft ->
+            CategorySummary(draft.id, draft.name, draft.count, draft.previews, isInvalid = false)
+        }.toMutableList()
+        invalidCategorySummary()?.let { summaries += it }
+        return summaries
+    }
+
+    private fun invalidCategorySummary(): CategorySummary? {
+        val previews = mutableListOf<String>()
+        var count = 0
+        readableDatabase.rawQuery(
+            """
+            SELECT c.name, m.cover_url
+            FROM note_categories nc
+            JOIN categories c ON c.id = nc.category_id
+            JOIN notes n ON n.rednote_id = nc.note_id
+            LEFT JOIN note_metadata_cache m ON m.rednote_id = nc.note_id
+            WHERE nc.category_id = ? AND n.status != ?
+            ORDER BY n.removed_at DESC, n.last_seen_at DESC
+            """.trimIndent(),
+            arrayOf(CATEGORY_INVALID, NoteStatus.ACTIVE.name),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                count += 1
+                val coverUrl = cursor.getString(1).orEmpty()
+                if (coverUrl.isNotBlank() && previews.size < 3) {
+                    previews += coverUrl
+                }
+            }
+        }
+        if (count == 0) return null
+        val name = stringFor("SELECT name FROM categories WHERE id = ?", CATEGORY_INVALID) ?: "失效收藏"
+        return CategorySummary(CATEGORY_INVALID, name, count, previews, isInvalid = true)
+    }
+
+    fun reconcileCompletedSync(accountUserId: String, syncedIds: Set<String>): Int {
+        ensureDefaults()
+        val now = System.currentTimeMillis()
+        var removed = 0
+        writableDatabase.transaction {
+            markSyncState(accountUserId, "", false, SyncStatus.COMPLETED, "")
+            removed = markMissingAsRemoved(syncedIds, now)
+        }
+        return removed
+    }
+
+    fun failSync(accountUserId: String, error: String) {
+        writableDatabase.transaction {
+            markSyncState(accountUserId.ifBlank { DEFAULT_ACCOUNT_ID }, "", false, SyncStatus.FAILED, error.sanitizedError())
         }
     }
 
     fun notesForCategory(categoryId: String, limit: Int = 100, offset: Int = 0): List<NoteCard> {
+        val statusFilter = if (categoryId == CATEGORY_INVALID) "n.status != ?" else "n.status = ?"
+        val statusArg = if (categoryId == CATEGORY_INVALID) NoteStatus.ACTIVE.name else NoteStatus.ACTIVE.name
         return readableDatabase.rawQuery(
             """
-            SELECT n.rednote_id, nc.category_id, m.title, m.desc, m.author_name, m.cover_url, n.note_url
+            SELECT n.rednote_id, nc.category_id, m.title, m.description, m.author_name, m.cover_url, n.note_url
             FROM note_categories nc
             JOIN notes n ON n.rednote_id = nc.note_id
             LEFT JOIN note_metadata_cache m ON m.rednote_id = n.rednote_id
-            WHERE nc.category_id = ? AND n.status = ?
-            ORDER BY n.last_seen_at DESC
+            WHERE nc.category_id = ? AND $statusFilter
+            ORDER BY n.removed_at DESC, n.last_seen_at DESC
             LIMIT ? OFFSET ?
             """.trimIndent(),
-            arrayOf(categoryId, NoteStatus.ACTIVE.name, limit.toString(), offset.toString()),
+            arrayOf(categoryId, statusArg, limit.toString(), offset.toString()),
         ).useEach { cursor ->
             NoteCard(
                 rednoteId = cursor.getString(0),
@@ -218,16 +312,16 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     fun searchableNotes(limit: Int = 500): List<SearchableNote> {
         return readableDatabase.rawQuery(
             """
-            SELECT n.rednote_id, c.id, c.name, m.title, m.desc, m.cover_url, n.note_url
+            SELECT n.rednote_id, c.id, c.name, m.title, m.description, m.cover_url, n.note_url
             FROM notes n
             JOIN note_categories nc ON nc.note_id = n.rednote_id
             JOIN categories c ON c.id = nc.category_id
             LEFT JOIN note_metadata_cache m ON m.rednote_id = n.rednote_id
-            WHERE n.status = ?
+            WHERE n.status = ? AND c.id != ?
             ORDER BY n.last_seen_at DESC
             LIMIT ?
             """.trimIndent(),
-            arrayOf(NoteStatus.ACTIVE.name, limit.toString()),
+            arrayOf(NoteStatus.ACTIVE.name, CATEGORY_INVALID, limit.toString()),
         ).useEach { cursor ->
             SearchableNote(
                 rednoteId = cursor.getString(0),
@@ -242,6 +336,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     }
 
     fun renameCategory(categoryId: String, name: String) {
+        if (categoryId == CATEGORY_INVALID) return
         val trimmed = name.trim()
         if (trimmed.isBlank()) return
         writableDatabase.update(
@@ -298,8 +393,32 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         writableDatabase.delete("note_metadata_cache", null, null)
     }
 
+    fun clearInvalidNotes(): Int {
+        var deleted = 0
+        writableDatabase.transaction {
+            val ids = rawQuery(
+                """
+                SELECT n.rednote_id
+                FROM notes n
+                JOIN note_categories nc ON nc.note_id = n.rednote_id
+                WHERE nc.category_id = ? AND n.status != ?
+                """.trimIndent(),
+                arrayOf(CATEGORY_INVALID, NoteStatus.ACTIVE.name),
+            ).useEach { it.getString(0) }
+            removeIdsFromPendingSuggestions(ids.toSet())
+            ids.forEach { rednoteId ->
+                delete("note_categories", "note_id = ?", arrayOf(rednoteId))
+                delete("note_metadata_cache", "rednote_id = ?", arrayOf(rednoteId))
+                delete("notes", "rednote_id = ?", arrayOf(rednoteId))
+                deleted += 1
+            }
+        }
+        return deleted
+    }
+
     fun clearAllLocalData() {
         writableDatabase.transaction {
+            delete("sync_state", null, null)
             delete("pending_category_suggestions", null, null)
             delete("note_categories", null, null)
             delete("categories", null, null)
@@ -309,18 +428,23 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         ensureDefaults()
     }
 
-    private fun SQLiteDatabase.markMissingAsRemoved(incomingIds: Set<String>, now: Long) {
+    private fun SQLiteDatabase.markMissingAsRemoved(incomingIds: Set<String>, now: Long): Int {
         val activeIds = rawQuery(
             "SELECT rednote_id FROM notes WHERE status = ?",
             arrayOf(NoteStatus.ACTIVE.name),
         ).useEach { it.getString(0) }
-        activeIds.filterNot { it in incomingIds }.forEach { missingId ->
+        val missingIds = activeIds.filterNot { it in incomingIds }
+        missingIds.forEach { missingId ->
             val values = ContentValues().apply {
                 put("status", NoteStatus.REMOVED.name)
                 put("removed_at", now)
             }
             update("notes", values, "rednote_id = ?", arrayOf(missingId))
+            delete("note_categories", "note_id = ?", arrayOf(missingId))
+            removeIdsFromPendingSuggestions(setOf(missingId))
+            replace("note_categories", noteCategoryValues(missingId, CATEGORY_INVALID, "system", 1.0, true))
         }
+        return missingIds.size
     }
 
     private fun SQLiteDatabase.createPendingSuggestion(note: SyncedNote, suggestedName: String, reason: String, now: Long) {
@@ -368,6 +492,32 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         )
     }
 
+    private fun SQLiteDatabase.removeIdsFromPendingSuggestions(rednoteIds: Set<String>) {
+        if (rednoteIds.isEmpty()) return
+        rawQuery(
+            """
+            SELECT id, rednote_ids
+            FROM pending_category_suggestions
+            WHERE status = ?
+            """.trimIndent(),
+            arrayOf("pending"),
+        ).useEach { cursor ->
+            cursor.getString(0) to cursor.getString(1)
+        }.forEach { (suggestionId, rawIds) ->
+            val remainingIds = rawIds.split(",").filter { it.isNotBlank() && it !in rednoteIds }
+            if (remainingIds.isEmpty()) {
+                delete("pending_category_suggestions", "id = ?", arrayOf(suggestionId))
+            } else {
+                update(
+                    "pending_category_suggestions",
+                    ContentValues().apply { put("rednote_ids", remainingIds.joinToString(",")) },
+                    "id = ?",
+                    arrayOf(suggestionId),
+                )
+            }
+        }
+    }
+
     private fun SQLiteDatabase.findPendingSuggestion(id: String): PendingCategorySuggestion? {
         return rawQuery(
             """
@@ -395,6 +545,42 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         return rawQuery(sql, args.toList().toTypedArray()).use { cursor ->
             if (cursor.moveToFirst()) cursor.getLong(0) else 0L
         }
+    }
+
+    private fun stringFor(sql: String, vararg args: String): String? {
+        return readableDatabase.rawQuery(sql, args.toList().toTypedArray()).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
+    private fun SQLiteDatabase.recordSyncPage(pageState: SyncPageState) {
+        markSyncState(
+            accountUserId = pageState.accountUserId.ifBlank { DEFAULT_ACCOUNT_ID },
+            cursor = pageState.cursor,
+            hasMore = pageState.hasMore,
+            status = SyncStatus.RUNNING,
+            lastError = "",
+        )
+    }
+
+    private fun SQLiteDatabase.markSyncState(
+        accountUserId: String,
+        cursor: String,
+        hasMore: Boolean,
+        status: SyncStatus,
+        lastError: String,
+    ) {
+        replace(
+            "sync_state",
+            ContentValues().apply {
+                put("account_user_id", accountUserId.ifBlank { DEFAULT_ACCOUNT_ID })
+                put("cursor", cursor)
+                put("has_more", if (hasMore) 1 else 0)
+                put("status", status.name)
+                put("last_error", lastError.sanitizedError())
+                put("updated_at", System.currentTimeMillis())
+            },
+        )
     }
 
     private fun classify(note: SyncedNote): Classification {
@@ -435,7 +621,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         return ContentValues().apply {
             put("rednote_id", note.rednoteId)
             put("title", note.title)
-            put("desc", note.desc)
+            put("description", note.desc)
             put("author_name", note.authorName)
             put("cover_url", note.coverUrl)
             put("cached_at", now)
@@ -461,8 +647,9 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
 
     companion object {
         private const val DB_NAME = "jishi_local.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 4
         private const val METADATA_TTL_MS = 30L * 24L * 60L * 60L * 1000L
+        private const val DEFAULT_ACCOUNT_ID = "current"
 
         const val CATEGORY_FOOD = "cat_food"
         const val CATEGORY_TRAVEL = "cat_travel"
@@ -470,10 +657,22 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         const val CATEGORY_OUTFIT = "cat_outfit"
         const val CATEGORY_GIFT = "cat_gift"
         const val CATEGORY_PENDING = "cat_pending"
+        const val CATEGORY_INVALID = "cat_invalid"
     }
 }
 
-data class SyncResult(val inserted: Int, val pendingGroups: Int)
+data class SyncResult(
+    val inserted: Int,
+    val pendingGroups: Int,
+    val syncedIds: Set<String> = emptySet(),
+    val accountUserId: String? = null,
+)
+
+data class SyncPageState(
+    val accountUserId: String,
+    val cursor: String,
+    val hasMore: Boolean,
+)
 
 private data class Classification(
     val categoryId: String?,
@@ -505,6 +704,11 @@ private fun SQLiteDatabase.insert(table: String, values: ContentValues): Long {
 
 private fun SQLiteDatabase.replace(table: String, values: ContentValues): Long {
     return replace(table, null, values)
+}
+
+private fun String.sanitizedError(): String {
+    return replace(Regex("""(?i)(cookie|x-s|x-s-common|x-t|a1)=?[^,\s;]*"""), "$1=<redacted>")
+        .take(240)
 }
 
 private inline fun <T> Cursor.useEach(mapper: (Cursor) -> T): List<T> {

@@ -26,7 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -94,7 +93,11 @@ fun AppRoot(state: AppUiState, actions: AppActions) {
                         syncFromJson = actions.syncFromJson,
                         onLoginReady = actions.onRednoteLoginReady,
                     )
-                    AppScreen.CategoryNotes -> NotesScreen(state, actions.openNote)
+                    AppScreen.CategoryNotes -> NotesScreen(
+                        state = state,
+                        openNote = actions.openNote,
+                        clearInvalidNotes = actions.clearInvalidNotes,
+                    )
                     AppScreen.Settings -> SettingsScreen(actions)
                 }
             }
@@ -102,6 +105,7 @@ fun AppRoot(state: AppUiState, actions: AppActions) {
                 HiddenRednoteSyncWebView(
                     syncFromJson = actions.syncFromJson,
                     postStatus = actions.updateRednoteSyncStatus,
+                    completeSync = actions.completeRednoteSync,
                 )
             }
             val editingCategory = state.categories.firstOrNull { it.id == state.editingCategoryId }

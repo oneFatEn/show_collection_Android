@@ -6,6 +6,13 @@ enum class NoteStatus {
     UNAVAILABLE,
 }
 
+enum class SyncStatus {
+    IDLE,
+    RUNNING,
+    FAILED,
+    COMPLETED,
+}
+
 data class Category(
     val id: String,
     val name: String,
@@ -28,6 +35,7 @@ data class CategorySummary(
     val name: String,
     val count: Int,
     val previews: List<String>,
+    val isInvalid: Boolean = false,
 )
 
 data class SearchableNote(

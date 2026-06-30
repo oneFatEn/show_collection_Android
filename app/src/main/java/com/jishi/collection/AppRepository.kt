@@ -30,7 +30,31 @@ class AppRepository(context: Context) {
     }
 
     suspend fun syncFromJson(json: String): SyncResult = withContext(Dispatchers.IO) {
-        db.syncNotes(parseNotes(json))
+        val payload = parseSyncPayload(json)
+        db.syncNotes(payload.notes, payload.pageState)
+    }
+
+    suspend fun completeSync(json: String): SyncCompleteResult = withContext(Dispatchers.IO) {
+        val root = JSONObject(json)
+        val success = root.optBoolean("success", false)
+        val accountUserId = root.optString("userId").ifBlank { "current" }
+        val message = root.optString("message").ifBlank {
+            if (success) "同步完成" else "同步失败"
+        }
+        if (success) {
+            val idsArray = root.optJSONArray("ids") ?: JSONArray()
+            val ids = buildSet {
+                for (index in 0 until idsArray.length()) {
+                    val id = idsArray.optString(index)
+                    if (id.isNotBlank()) add(id)
+                }
+            }
+            val removed = db.reconcileCompletedSync(accountUserId, ids)
+            SyncCompleteResult(success = true, message = message, total = ids.size, removed = removed)
+        } else {
+            db.failSync(accountUserId, message)
+            SyncCompleteResult(success = false, message = message, total = 0)
+        }
     }
 
     suspend fun acceptSuggestion(id: String, name: String) = withContext(Dispatchers.IO) {
@@ -53,6 +77,10 @@ class AppRepository(context: Context) {
         db.clearAllLocalData()
     }
 
+    suspend fun clearInvalidNotes(): Int = withContext(Dispatchers.IO) {
+        db.clearInvalidNotes()
+    }
+
     fun hasRednoteLoginState(): Boolean {
         val hosts = listOf(
             "https://www.xiaohongshu.com",
@@ -64,7 +92,11 @@ class AppRepository(context: Context) {
             .mapNotNull { CookieManager.getInstance().getCookie(it) }
             .flatMap { it.split(";").asSequence() }
             .map { it.trim() }
-            .any { it.startsWith("a1=") && it.length > "a1=".length }
+            .any { cookie ->
+                AUTH_COOKIE_NAMES.any { name ->
+                    cookie.startsWith("$name=") && cookie.length > "$name=".length
+                }
+            }
     }
 
     fun clearWebLoginState() {
@@ -78,15 +110,23 @@ class AppRepository(context: Context) {
         WebViewDatabase.getInstance(appContext).clearFormData()
     }
 
-    private fun parseNotes(json: String): List<SyncedNote> {
+    private fun parseSyncPayload(json: String): SyncPayload {
         val root = JSONObject(json)
+        val sync = root.optJSONObject("sync")
+        val pageState = sync?.let {
+            SyncPageState(
+                accountUserId = it.optString("accountUserId").ifBlank { "current" },
+                cursor = it.optString("cursor"),
+                hasMore = it.optBoolean("hasMore", false),
+            )
+        }
         val notesArray = when {
             root.has("notes") -> root.getJSONArray("notes")
             root.optJSONObject("data")?.has("notes") == true -> root.getJSONObject("data").getJSONArray("notes")
             else -> JSONArray()
         }
 
-        return buildList {
+        val notes = buildList {
             for (index in 0 until notesArray.length()) {
                 val item = notesArray.getJSONObject(index)
                 val noteCard = item.optJSONObject("note_card")
@@ -117,6 +157,7 @@ class AppRepository(context: Context) {
                 )
             }
         }
+        return SyncPayload(notes, pageState)
     }
 
     private fun extractCoverUrl(source: JSONObject): String {
@@ -182,3 +223,17 @@ data class HomeData(
     val suggestions: List<PendingCategorySuggestion>,
     val searchableNotes: List<SearchableNote>,
 )
+
+data class SyncCompleteResult(
+    val success: Boolean,
+    val message: String,
+    val total: Int,
+    val removed: Int = 0,
+)
+
+private data class SyncPayload(
+    val notes: List<SyncedNote>,
+    val pageState: SyncPageState?,
+)
+
+private val AUTH_COOKIE_NAMES = listOf("web_session")

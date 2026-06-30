@@ -52,6 +52,7 @@ fun CategoryListItem(
         label = "category-row-highlight",
     )
     Column(modifier = modifier.fillMaxWidth()) {
+        val textColor = if (category.isInvalid) JiShiColors.TextTertiary else JiShiColors.TextPrimary
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -68,7 +69,7 @@ fun CategoryListItem(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = category.name,
-                    color = JiShiColors.TextPrimary,
+                    color = textColor,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
@@ -82,17 +83,21 @@ fun CategoryListItem(
                     maxLines = 1,
                 )
             }
-            Box(
-                modifier = Modifier
-                    .padding(start = 16.dp)
-                    .size(31.dp)
-                    .clickable(onClick = onEdit),
-                contentAlignment = Alignment.Center,
-            ) {
-                PencilIcon(
-                    modifier = Modifier.size(15.dp),
-                    color = JiShiColors.TextTertiary,
-                )
+            if (!category.isInvalid) {
+                Box(
+                    modifier = Modifier
+                        .padding(start = 16.dp)
+                        .size(31.dp)
+                        .clickable(onClick = onEdit),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    PencilIcon(
+                        modifier = Modifier.size(15.dp),
+                        color = JiShiColors.TextTertiary,
+                    )
+                }
+            } else {
+                Spacer(Modifier.width(47.dp))
             }
         }
         HorizontalDivider(

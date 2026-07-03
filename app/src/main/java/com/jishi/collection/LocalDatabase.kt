@@ -29,6 +29,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 rednote_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 description TEXT NOT NULL,
+                ai_keywords TEXT NOT NULL DEFAULT '',
                 author_name TEXT NOT NULL,
                 cover_url TEXT NOT NULL,
                 cached_at INTEGER NOT NULL,
@@ -45,6 +46,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 name TEXT NOT NULL,
                 type TEXT NOT NULL,
                 sort_order INTEGER NOT NULL,
+                coarse_id TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -92,6 +94,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             )
             """.trimIndent(),
         )
+        createAiClassificationQueue(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -122,6 +125,15 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         if (oldVersion < 4) {
             db.execSQL("ALTER TABLE note_metadata_cache RENAME COLUMN \"desc\" TO description")
         }
+        if (oldVersion < 5) {
+            db.execSQL("ALTER TABLE note_metadata_cache ADD COLUMN ai_keywords TEXT NOT NULL DEFAULT ''")
+        }
+        if (oldVersion < 6) {
+            createAiClassificationQueue(db)
+        }
+        if (oldVersion < 7) {
+            db.execSQL("ALTER TABLE categories ADD COLUMN coarse_id TEXT NOT NULL DEFAULT ''")
+        }
     }
 
     fun ensureDefaults() {
@@ -143,21 +155,26 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         }
     }
 
-    fun syncNotes(notes: List<SyncedNote>, pageState: SyncPageState? = null): SyncResult {
+    fun syncNotes(
+        notes: List<SyncedNote>,
+        pageState: SyncPageState? = null,
+    ): SyncResult {
         ensureDefaults()
         if (notes.isEmpty()) {
             pageState?.let { state ->
                 writableDatabase.transaction { recordSyncPage(state) }
             }
-            return SyncResult(0, 0, emptySet(), pageState?.accountUserId)
+            return SyncResult(0, 0, accountUserId = pageState?.accountUserId)
         }
         val now = System.currentTimeMillis()
         val incomingIds = notes.map { it.rednoteId }.toSet()
+        var incomingChangedIds = emptySet<String>()
         var inserted = 0
-        var pendingGroups = 0
+        val pendingGroups = 0
 
         writableDatabase.transaction {
             pageState?.let { recordSyncPage(it) }
+            val changedIds = mutableSetOf<String>()
             notes.forEach { note ->
                 val existingStatus = stringFor("SELECT status FROM notes WHERE rednote_id = ?", note.rednoteId)
                 val isNew = existingStatus == null
@@ -173,10 +190,12 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 if (isNew) {
                     insert("notes", noteValues)
                     inserted += 1
+                    changedIds += note.rednoteId
                 } else {
                     update("notes", noteValues, "rednote_id = ?", arrayOf(note.rednoteId))
                     if (wasInvalid) {
                         inserted += 1
+                        changedIds += note.rednoteId
                     }
                 }
 
@@ -186,18 +205,13 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     if (wasInvalid) {
                         delete("note_categories", "note_id = ? AND category_id = ?", arrayOf(note.rednoteId, CATEGORY_INVALID))
                     }
-                    val match = classify(note)
-                    if (match.categoryId != null) {
-                        replace("note_categories", noteCategoryValues(note.rednoteId, match.categoryId, "rule", match.confidence, false))
-                    } else {
-                        createPendingSuggestion(note, match.suggestedName, match.reason, now)
-                        replace("note_categories", noteCategoryValues(note.rednoteId, CATEGORY_PENDING, "rule", 0.1, false))
-                        pendingGroups += 1
-                    }
+                    // 同步只负责入库，不做分类：新笔记先进待整理，等分类按钮或增量匹配处理
+                    replace("note_categories", noteCategoryValues(note.rednoteId, CATEGORY_PENDING, "sync", 0.1, false))
                 }
             }
+            incomingChangedIds = changedIds
         }
-        return SyncResult(inserted, pendingGroups, incomingIds, pageState?.accountUserId)
+        return SyncResult(inserted, pendingGroups, incomingIds, incomingChangedIds, pageState?.accountUserId)
     }
 
     fun categorySummaries(): List<CategorySummary> {
@@ -419,6 +433,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     fun clearAllLocalData() {
         writableDatabase.transaction {
             delete("sync_state", null, null)
+            delete("ai_classification_queue", null, null)
             delete("pending_category_suggestions", null, null)
             delete("note_categories", null, null)
             delete("categories", null, null)
@@ -426,6 +441,215 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             delete("notes", null, null)
         }
         ensureDefaults()
+    }
+
+    fun rerunRuleClassification(noteIds: Set<String>? = null): Int {
+        ensureDefaults()
+        val notes = activeSyncedNotes(noteIds)
+        if (notes.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        var classified = 0
+        writableDatabase.transaction {
+            notes.forEach { note ->
+                val locked = longFor(
+                    "SELECT COUNT(*) FROM note_categories WHERE note_id = ? AND locked_by_user = 1",
+                    note.rednoteId,
+                ) > 0L
+                if (!locked) {
+                    delete("note_categories", "note_id = ?", arrayOf(note.rednoteId))
+                    removeIdsFromPendingSuggestions(setOf(note.rednoteId))
+                    val match = classify(note)
+                    if (match.categoryId != null) {
+                        replace("note_categories", noteCategoryValues(note.rednoteId, match.categoryId, "rule", match.confidence, false))
+                    } else {
+                        createPendingSuggestion(note, match.suggestedName, match.reason, now)
+                        replace("note_categories", noteCategoryValues(note.rednoteId, CATEGORY_PENDING, "rule", 0.1, false))
+                    }
+                    classified += 1
+                }
+            }
+        }
+        return classified
+    }
+
+    /** 待粗分类的笔记：没有分类或还在“待整理”里的活跃笔记。 */
+    fun aiNotesForCoarseClassification(noteIds: Set<String>? = null): List<AiNote> {
+        ensureDefaults()
+        val args = mutableListOf(NoteStatus.ACTIVE.name, CATEGORY_PENDING)
+        val idFilter = if (noteIds.isNullOrEmpty()) {
+            ""
+        } else {
+            args += noteIds
+            " AND n.rednote_id IN (${noteIds.joinToString(",") { "?" }})"
+        }
+        return readableDatabase.rawQuery(
+            """
+            SELECT n.rednote_id, m.title, m.description, m.ai_keywords, c.id, c.name
+            FROM notes n
+            LEFT JOIN note_metadata_cache m ON m.rednote_id = n.rednote_id
+            LEFT JOIN note_categories nc ON nc.note_id = n.rednote_id
+            LEFT JOIN categories c ON c.id = nc.category_id
+            WHERE n.status = ? AND (c.id IS NULL OR c.id = ?)$idFilter
+            ORDER BY n.last_seen_at DESC
+            """.trimIndent(),
+            args.toTypedArray(),
+        ).useEach { cursor ->
+            AiNote(
+                rednoteId = cursor.getString(0),
+                title = cursor.getString(1).orEmpty().ifBlank { "未命名收藏" },
+                desc = cursor.getString(2).orEmpty(),
+                aiKeywords = cursor.getString(3).orEmpty(),
+                categoryId = cursor.getString(4),
+                categoryName = cursor.getString(5),
+            )
+        }.distinctBy { it.rednoteId }
+    }
+
+    fun ensureCoarseCategories(defs: List<CoarseCategoryDef>) {
+        writableDatabase.transaction {
+            val now = System.currentTimeMillis()
+            defs.forEachIndexed { index, def ->
+                if (longFor("SELECT COUNT(*) FROM categories WHERE id = ?", def.id) == 0L) {
+                    insert("categories", categoryValues(Category(def.id, def.name, "coarse", 100 + index, coarseId = def.id), now))
+                }
+            }
+        }
+    }
+
+    fun aiNotesInCategory(categoryId: String): List<AiNote> {
+        return readableDatabase.rawQuery(
+            """
+            SELECT n.rednote_id, m.title, m.description, m.ai_keywords, c.id, c.name
+            FROM note_categories nc
+            JOIN notes n ON n.rednote_id = nc.note_id
+            JOIN categories c ON c.id = nc.category_id
+            LEFT JOIN note_metadata_cache m ON m.rednote_id = n.rednote_id
+            WHERE n.status = ? AND nc.category_id = ?
+            ORDER BY n.last_seen_at DESC
+            """.trimIndent(),
+            arrayOf(NoteStatus.ACTIVE.name, categoryId),
+        ).useEach { cursor ->
+            AiNote(
+                rednoteId = cursor.getString(0),
+                title = cursor.getString(1).orEmpty().ifBlank { "未命名收藏" },
+                desc = cursor.getString(2).orEmpty(),
+                aiKeywords = cursor.getString(3).orEmpty(),
+                categoryId = cursor.getString(4),
+                categoryName = cursor.getString(5),
+            )
+        }
+    }
+
+    fun aiCategoryProfiles(): List<AiCategoryProfile> {
+        ensureDefaults()
+        return readableDatabase.rawQuery(
+            """
+            SELECT c.id, c.name, c.coarse_id, COUNT(n.rednote_id), GROUP_CONCAT(
+                CASE
+                    WHEN m.ai_keywords IS NOT NULL AND m.ai_keywords != '' THEN m.ai_keywords
+                    ELSE m.title || ' ' || m.description
+                END,
+                '；'
+            )
+            FROM categories c
+            JOIN note_categories nc ON nc.category_id = c.id
+            JOIN notes n ON n.rednote_id = nc.note_id
+            LEFT JOIN note_metadata_cache m ON m.rednote_id = n.rednote_id
+            WHERE n.status = ? AND c.id NOT IN (?, ?)
+            GROUP BY c.id, c.name, c.coarse_id
+            ORDER BY c.sort_order ASC, c.name ASC
+            """.trimIndent(),
+            arrayOf(NoteStatus.ACTIVE.name, CATEGORY_PENDING, CATEGORY_INVALID),
+        ).useEach { cursor ->
+            AiCategoryProfile(
+                id = cursor.getString(0),
+                name = cursor.getString(1),
+                coarseId = cursor.getString(2).orEmpty(),
+                count = cursor.getInt(3),
+                sampleText = cursor.getString(4).orEmpty().take(1200),
+            )
+        }
+    }
+
+    fun updateAiKeywords(keywordsByNoteId: Map<String, String>): Int {
+        if (keywordsByNoteId.isEmpty()) return 0
+        var updated = 0
+        writableDatabase.transaction {
+            keywordsByNoteId.forEach { (noteId, keywords) ->
+                val affected = update(
+                    "note_metadata_cache",
+                    ContentValues().apply {
+                        put("ai_keywords", keywords.trim().take(240))
+                        put("cached_at", System.currentTimeMillis())
+                    },
+                    "rednote_id = ?",
+                    arrayOf(noteId),
+                )
+                if (affected > 0) updated += 1
+            }
+        }
+        return updated
+    }
+
+    fun assignNotesToCategories(assignments: Map<String, Pair<String, Double>>): Int {
+        if (assignments.isEmpty()) return 0
+        var moved = 0
+        writableDatabase.transaction {
+            assignments.forEach { (noteId, target) ->
+                val locked = longFor(
+                    "SELECT COUNT(*) FROM note_categories WHERE note_id = ? AND locked_by_user = 1",
+                    noteId,
+                ) > 0L
+                if (!locked) {
+                    delete("note_categories", "note_id = ?", arrayOf(noteId))
+                    replace("note_categories", noteCategoryValues(noteId, target.first, "ai", target.second, false))
+                    removeIdsFromPendingSuggestions(setOf(noteId))
+                    moved += 1
+                }
+            }
+        }
+        return moved
+    }
+
+    /**
+     * 把一个分类裂变为多个细分分类。groups 中未覆盖的笔记留在原分类；
+     * 细分分类继承原分类的 coarse_id；原分类清空后删除。
+     */
+    fun splitCategoryInto(categoryId: String, groups: List<AiSeedCategory>): Int {
+        if (categoryId == CATEGORY_PENDING || categoryId == CATEGORY_INVALID) return 0
+        val validGroups = groups
+            .map { it.copy(name = it.name.trim(), noteIds = it.noteIds.filter(String::isNotBlank).distinct()) }
+            .filter { it.name.isNotBlank() && it.noteIds.isNotEmpty() }
+        if (validGroups.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        var created = 0
+        writableDatabase.transaction {
+            val coarseId = stringFor("SELECT coarse_id FROM categories WHERE id = ?", categoryId).orEmpty()
+            val originalOrder = longFor("SELECT sort_order FROM categories WHERE id = ?", categoryId).toInt()
+            val movedIds = mutableSetOf<String>()
+            validGroups.forEach { group ->
+                val movableIds = group.noteIds.filter { noteId ->
+                    noteId !in movedIds && longFor(
+                        "SELECT COUNT(*) FROM note_categories WHERE note_id = ? AND category_id = ? AND locked_by_user = 0",
+                        noteId,
+                        categoryId,
+                    ) > 0L
+                }
+                if (movableIds.isEmpty()) return@forEach
+                val newCategoryId = "cat_${UUID.randomUUID()}"
+                insert("categories", categoryValues(Category(newCategoryId, group.name.take(24), "ai", originalOrder + created, coarseId), now))
+                created += 1
+                movableIds.forEach { noteId ->
+                    delete("note_categories", "note_id = ? AND category_id = ?", arrayOf(noteId, categoryId))
+                    replace("note_categories", noteCategoryValues(noteId, newCategoryId, "ai_split", 1.0, false))
+                    movedIds += noteId
+                }
+            }
+            if (longFor("SELECT COUNT(*) FROM note_categories WHERE category_id = ?", categoryId) == 0L) {
+                delete("categories", "id = ?", arrayOf(categoryId))
+            }
+        }
+        return created
     }
 
     private fun SQLiteDatabase.markMissingAsRemoved(incomingIds: Set<String>, now: Long): Int {
@@ -445,6 +669,35 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             replace("note_categories", noteCategoryValues(missingId, CATEGORY_INVALID, "system", 1.0, true))
         }
         return missingIds.size
+    }
+
+    private fun activeSyncedNotes(noteIds: Set<String>?): List<SyncedNote> {
+        val args = mutableListOf(NoteStatus.ACTIVE.name)
+        val idFilter = if (noteIds.isNullOrEmpty()) {
+            ""
+        } else {
+            args += noteIds
+            " AND n.rednote_id IN (${noteIds.joinToString(",") { "?" }})"
+        }
+        return readableDatabase.rawQuery(
+            """
+            SELECT n.rednote_id, m.title, m.description, m.author_name, m.cover_url, n.note_url
+            FROM notes n
+            LEFT JOIN note_metadata_cache m ON m.rednote_id = n.rednote_id
+            WHERE n.status = ?$idFilter
+            ORDER BY n.last_seen_at DESC
+            """.trimIndent(),
+            args.toTypedArray(),
+        ).useEach { cursor ->
+            SyncedNote(
+                rednoteId = cursor.getString(0),
+                title = cursor.getString(1).orEmpty().ifBlank { "未命名收藏" },
+                desc = cursor.getString(2).orEmpty(),
+                authorName = cursor.getString(3).orEmpty(),
+                coverUrl = cursor.getString(4).orEmpty(),
+                noteUrl = cursor.getString(5).orEmpty(),
+            )
+        }
     }
 
     private fun SQLiteDatabase.createPendingSuggestion(note: SyncedNote, suggestedName: String, reason: String, now: Long) {
@@ -612,6 +865,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             put("name", category.name)
             put("type", category.type)
             put("sort_order", category.sortOrder)
+            put("coarse_id", category.coarseId)
             put("created_at", now)
             put("updated_at", now)
         }
@@ -622,11 +876,16 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             put("rednote_id", note.rednoteId)
             put("title", note.title)
             put("description", note.desc)
+            put("ai_keywords", existingAiKeywords(note.rednoteId))
             put("author_name", note.authorName)
             put("cover_url", note.coverUrl)
             put("cached_at", now)
             put("expires_at", now + METADATA_TTL_MS)
         }
+    }
+
+    private fun existingAiKeywords(rednoteId: String): String {
+        return stringFor("SELECT ai_keywords FROM note_metadata_cache WHERE rednote_id = ?", rednoteId).orEmpty()
     }
 
     private fun noteCategoryValues(
@@ -647,7 +906,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
 
     companion object {
         private const val DB_NAME = "jishi_local.db"
-        private const val DB_VERSION = 4
+        private const val DB_VERSION = 7
         private const val METADATA_TTL_MS = 30L * 24L * 60L * 60L * 1000L
         private const val DEFAULT_ACCOUNT_ID = "current"
 
@@ -659,12 +918,30 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         const val CATEGORY_PENDING = "cat_pending"
         const val CATEGORY_INVALID = "cat_invalid"
     }
+
+}
+
+private fun createAiClassificationQueue(db: SQLiteDatabase) {
+    db.execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS ai_classification_queue (
+            id TEXT PRIMARY KEY,
+            task_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """.trimIndent(),
+    )
+    db.execSQL("CREATE INDEX IF NOT EXISTS idx_ai_queue_status_created ON ai_classification_queue(status, created_at)")
 }
 
 data class SyncResult(
     val inserted: Int,
     val pendingGroups: Int,
     val syncedIds: Set<String> = emptySet(),
+    val changedNoteIds: Set<String> = emptySet(),
     val accountUserId: String? = null,
 )
 

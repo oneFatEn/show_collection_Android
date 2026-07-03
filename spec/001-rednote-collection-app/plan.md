@@ -34,7 +34,9 @@ app
       CacheCleanupDao
     classification
       RuleClassifier
-      CategoryMatcher
+      NoteKeywordSummarizer
+      KeywordEmbeddingMatcher
+      CategorySplitter
       PendingCategorySuggestionRepository
     security
       PrivacyDataCleaner
@@ -65,6 +67,7 @@ app
 - `rednoteId`。
 - `title`。
 - `desc`。
+- `aiKeywords`：DeepSeek 从标题和摘要中提取的分类关键词，多个关键词用分隔符保存或用 JSON 数组保存。
 - `authorName`。
 - `coverUrl`。
 - `thumbnailCacheKey`。
@@ -77,6 +80,7 @@ app
 - `rednoteId` 建唯一索引。
 - `expiresAt` 建索引，用于过期清理。
 - 该表服务于分类内卡片预览。已确定采用轻量缓存：标题、摘要、作者、封面 URL 属于可清理展示缓存；图片二进制交给 Coil 等图片库缓存，不进入核心业务表。
+- `aiKeywords` 属于可再生分类缓存，不是核心长期数据；清理展示缓存后可以由大模型重新生成。
 - 缓存表清理不得影响 `Note`、`Category`、`NoteCategory`。
 - `rawJson` 只允许保存必要调试字段或可清理原始片段；发布版本默认不长期保存完整响应。
 
@@ -98,7 +102,7 @@ app
 
 - `noteId`。
 - `categoryId`。
-- `source`：rule / embedding / llm / manual。
+- `source`：rule / ai_seed / ai / ai_split / manual。
 - `confidence`。
 - `lockedByUser`。
 
@@ -108,6 +112,24 @@ app
 - 建索引：`categoryId`，用于分类内列表分页。
 - 建索引：`noteId`，用于软删除和移动分类。
 - 采用“分类 ID -> 多个笔记 ID”的关系模型，数据库上用 `NoteCategory` 关系表表达，避免把数组塞进单条 Category 记录。这样便于查询、移动、删除和未来支持一条笔记多个分类。
+- `rule` 表示固定关键词分类；`ai_seed` 表示冷启动聚类创建初始分类；`ai` 表示基于关键词 embedding 的自动匹配；`ai_split` 表示大模型裂变分类产生的新关系；`manual` 表示用户手动确认或移动，自动分类不得覆盖。
+
+### AiClassificationSettings
+
+- `deepSeekApiKey`：用户自定义 DeepSeek API Key。
+- `embeddingApiKey`：用户自定义 Embedding API Key。
+- `embeddingBaseUrl`：默认 `https://api.chatanywhere.tech/v1`。
+- `tolerance`：strict / balanced / loose。
+- `splitThreshold`：分类夹超过该笔记数后触发裂变。
+- `matchThreshold`：新增笔记与分类夹相似度超过该值时自动归类。
+
+约束：
+
+- DeepSeek API Key 和 Embedding API Key 均存在时才启用 AI 分类。
+- API Key 不写入日志、崩溃上报或普通调试输出。
+- 未启用 AI 分类时，裂变阈值和匹配阈值配置在 UI 上置灰。
+- 保存配置后触发一次全量 AI 分类；完整同步结束后只对新增或恢复笔记触发增量 AI 分类。
+- 如果没有可用于 embedding 匹配的有效分类样本，AI 分类先进入冷启动聚类，由 DeepSeek 生成初始分类名和笔记归属。
 
 ### SyncState
 
@@ -142,7 +164,9 @@ app
 - Room DAO 必须提供分类内分页查询，返回当前分类的 `Note + NoteMetadataCache` 投影，不在 UI 层手动 join。
 - 分类首页的每个分类数量通过 SQL `COUNT` 或缓存统计字段获得。
 - 同步页按分页结果批量 upsert，单页写入放在同一个数据库事务内。
-- 分类匹配只处理新增笔记；已有笔记除非用户手动触发重新分类，否则不重复计算。
+- 分类匹配只处理新增笔记；已有笔记除非用户保存 AI 配置或手动触发重新分类，否则不重复计算。
+- AI 分类必须先补齐笔记关键词缓存，再用关键词 embedding 计算相似度；避免直接对长标题/摘要做 embedding 导致分类相似度不稳定。
+- 冷启动分类只在没有有效分类样本时触发；模型应基于笔记关键词生成 3 到 8 个初始分类，避免只依赖固定系统分类启动。
 - Compose 列表使用稳定 key：`rednoteId` 或 `categoryId`。
 - 图片使用 Coil，限制列表缩略图尺寸，启用磁盘缓存，不把图片二进制写入 Room。
 - 展示缓存清理分两种：用户手动清理全部缓存；维护任务清理 `expiresAt` 过期缓存。
@@ -166,14 +190,15 @@ app
 4. 获取收藏第一页并入库。
 5. 实现 Room 数据库、分类关系表和基础列表展示。
 6. 实现规则分类、已有分类匹配和文件夹首页。
-7. 实现新增类别确认弹窗，候选分类名预填。
-8. 实现点击笔记跳转小红书或浏览器。
+7. 实现 AI 分类设置页、关键词缓存、关键词 embedding 匹配和分类裂变。
+8. 实现新增类别确认弹窗，候选分类名预填。
+9. 实现点击笔记跳转小红书或浏览器。
 
 ## 第二阶段里程碑
 
 1. 完整分页同步。
 2. WorkManager 后台同步。
-3. Embedding/LLM 分类。
+3. WorkManager 后台 AI 分类任务。
 4. 用户手动移动分类。
 5. 搜索和筛选。
 6. 导出 Markdown/CSV。
@@ -183,7 +208,7 @@ app
 - 先做单模块 App，等功能稳定后再考虑多模块。
 - 先实现本地优先，避免一开始引入后端。
 - 小红书请求优先保留在 WebView 上下文，Native 不主动伪造签名请求。
-- 分类第一版只做规则分类 + 「待整理」兜底；embedding/LLM 后置。
+- 分类采用规则兜底 + 用户可选 AI 语义分类。AI 语义分类先用 DeepSeek 把标题和摘要总结为关键词并缓存，再使用 `text-embedding-3-small` 对关键词做相似度匹配。
 - 所有自动分类都必须允许用户修正。
 - 按可能上架或一定量网络传播来设计隐私说明、数据清除和失败降级。
 - 分类关系使用关系表，不使用 Category 内嵌笔记 ID 数组。
@@ -205,4 +230,3 @@ app
 - 多账号隔离。
 - 云同步。
 - 全量图片离线缓存。
-- embedding/LLM 智能分类。

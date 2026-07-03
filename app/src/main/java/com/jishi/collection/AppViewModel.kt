@@ -17,6 +17,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
 
     init {
+        _uiState.update { it.copy(aiSettings = repository.loadAiSettings()) }
         refreshHome()
     }
 
@@ -118,13 +119,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         _uiState.update {
-            it.copy(
-                rednoteSyncRequested = true,
-                isSyncing = true,
-                syncStartActiveCount = it.activeCategoryCount(),
-                message = null,
-            )
-        }
+                it.copy(
+                    rednoteSyncRequested = true,
+                    isSyncing = true,
+                    syncStartActiveCount = it.activeCategoryCount(),
+                    incrementalAiNoteIds = emptySet(),
+                    message = null,
+                )
+            }
     }
 
     fun onRednoteLoginReady() {
@@ -137,6 +139,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     rednoteSyncRequested = true,
                     isSyncing = true,
                     syncStartActiveCount = it.activeCategoryCount(),
+                    incrementalAiNoteIds = emptySet(),
                     message = "登录成功，正在同步收藏...",
                 )
             } else {
@@ -224,6 +227,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         it.copy(
                             isSyncing = fromHiddenSync,
+                            incrementalAiNoteIds = it.incrementalAiNoteIds + result.changedNoteIds,
                             categories = home.categories,
                             suggestions = home.suggestions,
                             searchableNotes = home.searchableNotes,
@@ -267,19 +271,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             )
                         }
                         val netChange = home.categories.activeCount() - it.syncStartActiveCount
+                        val changedIds = it.incrementalAiNoteIds
+                        val willMatch = result.success && changedIds.isNotEmpty() && it.aiSettings.embeddingEnabled
                         it.copy(
                             rednoteSyncRequested = false,
                             isSyncing = false,
+                            isAiClassifying = willMatch,
                             syncStartActiveCount = home.categories.activeCount(),
                             categories = home.categories,
                             suggestions = home.suggestions,
                             searchableNotes = home.searchableNotes,
                             message = if (result.success) {
-                                syncNetMessage(netChange)
+                                if (willMatch) {
+                                    "同步完成，正在把新增笔记匹配到现有分类..."
+                                } else {
+                                    syncNetMessage(netChange)
+                                }
                             } else {
                                 "同步失败：${result.message}"
                             },
                         )
+                    }
+                    if (result.success) {
+                        val changedIds = _uiState.value.incrementalAiNoteIds
+                        if (changedIds.isNotEmpty() && _uiState.value.aiSettings.embeddingEnabled) {
+                            runIncrementalMatch(changedIds)
+                        } else {
+                            _uiState.update { it.copy(incrementalAiNoteIds = emptySet()) }
+                        }
                     }
                 }
                 .onFailure { error ->
@@ -321,6 +340,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     message = "已保留在待整理",
                 )
             }
+        }
+    }
+
+    fun saveAiSettings(settings: AiClassificationSettings) {
+        viewModelScope.launch {
+            repository.saveAiSettings(settings)
+            _uiState.update {
+                it.copy(
+                    screen = AppScreen.Home,
+                    previousScreen = null,
+                    aiSettings = settings,
+                    message = if (settings.smartClassificationEnabled) {
+                        "已保存，点击首页“分类”按钮开始整理收藏"
+                    } else {
+                        "已保存，未配置 API Key 时使用固定分类词"
+                    },
+                )
+            }
+        }
+    }
+
+    fun classifyCollections() {
+        _uiState.update {
+            it.copy(
+                isAiClassifying = true,
+                message = if (it.aiSettings.smartClassificationEnabled) {
+                    "粗分类中，正在等待大模型返回..."
+                } else {
+                    "正在按固定分类词整理..."
+                },
+            )
+        }
+        if (_uiState.value.aiSettings.smartClassificationEnabled) {
+            runCoarseClassification()
+        } else {
+            runRuleClassification()
         }
     }
 
@@ -413,6 +468,71 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
     }
+
+    private fun runRuleClassification() {
+        viewModelScope.launch {
+            runCatching { repository.runRuleClassification() }
+                .onSuccess { classified ->
+                    finishClassification("规则分类完成：整理 $classified 条")
+                }
+                .onFailure { error ->
+                    failClassification("规则分类失败：${error.message ?: "未知错误"}")
+                }
+        }
+    }
+
+    /** 分类按钮：粗分类 + 约束裂变 */
+    private fun runCoarseClassification() {
+        viewModelScope.launch {
+            runCatching { repository.runCoarseClassification() }
+                .onSuccess { result ->
+                    finishClassification(coarseClassificationMessage(result))
+                }
+                .onFailure { error ->
+                    failClassification("AI 分类失败：${error.message ?: "接口异常"}")
+                }
+        }
+    }
+
+    /** 同步后的增量路径：新增笔记与现有分类做 embedding 相似度匹配 */
+    private fun runIncrementalMatch(noteIds: Set<String>) {
+        viewModelScope.launch {
+            runCatching { repository.runIncrementalEmbeddingMatch(noteIds) }
+                .onSuccess { result ->
+                    finishClassification(incrementalMatchMessage(result, noteIds.size))
+                }
+                .onFailure { error ->
+                    failClassification("增量匹配失败：${error.message ?: "接口异常"}，新增笔记已放入待整理")
+                }
+        }
+    }
+
+    private suspend fun finishClassification(message: String) {
+        val home = repository.loadHome()
+        val selectedCategoryId = _uiState.value.selectedCategoryId
+        val selectedNotes = selectedCategoryId?.let { repository.notesForCategory(it) }
+        _uiState.update {
+            it.copy(
+                categories = home.categories,
+                suggestions = home.suggestions,
+                searchableNotes = home.searchableNotes,
+                notes = selectedNotes ?: it.notes,
+                incrementalAiNoteIds = emptySet(),
+                isAiClassifying = false,
+                message = message,
+            )
+        }
+    }
+
+    private fun failClassification(message: String) {
+        _uiState.update {
+            it.copy(
+                incrementalAiNoteIds = emptySet(),
+                isAiClassifying = false,
+                message = message,
+            )
+        }
+    }
 }
 
 private fun syncDoneMessage(raw: String, fallbackTotal: Int): String {
@@ -458,8 +578,27 @@ data class AppUiState(
     val rednoteSyncRequested: Boolean = false,
     val pendingSyncAfterLogin: Boolean = false,
     val syncStartActiveCount: Int = 0,
+    val incrementalAiNoteIds: Set<String> = emptySet(),
+    val aiSettings: AiClassificationSettings = AiClassificationSettings(),
+    val isAiClassifying: Boolean = false,
     val message: String? = null,
 )
+
+private fun coarseClassificationMessage(result: AiClassificationRunResult): String {
+    result.skippedReason?.let { return it }
+    val base = "分类完成：归类 ${result.matched} 条"
+    return if (result.splitCategories > 0) "$base，裂变出 ${result.splitCategories} 个细分分类" else base
+}
+
+private fun incrementalMatchMessage(result: AiClassificationRunResult, total: Int): String {
+    result.skippedReason?.let { return it }
+    val unmatched = (total - result.matched).coerceAtLeast(0)
+    return if (unmatched > 0) {
+        "已同步：${result.matched} 条匹配到现有分类，$unmatched 条在待整理"
+    } else {
+        "已同步：${result.matched} 条匹配到现有分类"
+    }
+}
 
 enum class AppScreen {
     Home,

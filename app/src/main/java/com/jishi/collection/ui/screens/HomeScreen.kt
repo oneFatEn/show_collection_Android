@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -90,11 +91,18 @@ fun HomeScreen(state: AppUiState, actions: AppActions) {
                     text = "分类 · ${categories.size}",
                     modifier = Modifier.padding(horizontal = 24.dp),
                     action = {
-                        SyncStatusButton(
-                            text = syncButtonText(state),
-                            isSyncing = state.isSyncing,
-                            onClick = actions.startRednoteSync,
-                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            SyncStatusButton(
+                                text = if (state.isAiClassifying) "分类中" else "分类",
+                                isSyncing = state.isAiClassifying || state.isSyncing,
+                                onClick = actions.classifyCollections,
+                            )
+                            SyncStatusButton(
+                                text = syncButtonText(state),
+                                isSyncing = state.isSyncing,
+                                onClick = actions.startRednoteSync,
+                            )
+                        }
                     },
                 )
                 Spacer(Modifier.height(12.dp))

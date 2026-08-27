@@ -311,8 +311,8 @@ private val LucideRefreshCw: ImageVector = ImageVector.Builder(
 @Composable
 fun SectionLabel(
     text: String,
-    action: @Composable (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    action: @Composable (() -> Unit)? = null,
 ) {
     Row(
         modifier = modifier.fillMaxWidth(),

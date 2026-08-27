@@ -1,0 +1,19 @@
+app/src/main/java/com/jishi/collection/ui/components/QuietControls.kt
+  s_c2d963ff5d85f6::t_40a9c7c966b417 315
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "4eaf4a129bc678c6bb3a3582b2c84a4641719395",
+  "prompts": {},
+  "sessions": {
+    "s_c2d963ff5d85f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a04337-7cb9-7d31-ad3b-9928670db84f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "hukeming.5 <hukeming.5@jd.com>"
+    }
+  }
+}

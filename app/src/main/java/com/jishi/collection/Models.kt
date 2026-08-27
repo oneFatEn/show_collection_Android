@@ -13,32 +13,15 @@ enum class SyncStatus {
     COMPLETED,
 }
 
-enum class AiClassificationTolerance(
-    val label: String,
-    val splitThreshold: Int,
-    val matchThreshold: Double,
-) {
-    STRICT("严格", 24, 0.68),
-    BALANCED("平衡", 36, 0.56),
-    LOOSE("宽容", 50, 0.42),
-}
-
 data class AiClassificationSettings(
     val deepSeekApiKey: String = "",
-    val embeddingApiKey: String = "",
-    val embeddingBaseUrl: String = DEFAULT_EMBEDDING_BASE_URL,
-    val tolerance: AiClassificationTolerance = AiClassificationTolerance.BALANCED,
-    val customSplitThreshold: Int = AiClassificationTolerance.BALANCED.splitThreshold,
-    val customMatchThreshold: Double = AiClassificationTolerance.BALANCED.matchThreshold,
 ) {
     val aiEnabled: Boolean
-        get() = deepSeekApiKey.isNotBlank() && embeddingApiKey.isNotBlank()
+        get() = deepSeekApiKey.isNotBlank()
 
     val smartClassificationEnabled: Boolean
         get() = deepSeekApiKey.isNotBlank()
 
-    val embeddingEnabled: Boolean
-        get() = embeddingApiKey.isNotBlank()
 }
 
 data class Category(
@@ -47,6 +30,12 @@ data class Category(
     val type: String,
     val sortOrder: Int,
     val coarseId: String = "",
+    val level: Int = 1,
+    val parentId: String? = null,
+    val systemKey: String = "",
+    val fissionDimension: String = "",
+    val source: String = type,
+    val status: String = "active",
 )
 
 data class NoteCard(
@@ -100,6 +89,7 @@ data class AiNote(
     val aiKeywords: String,
     val categoryId: String?,
     val categoryName: String?,
+    val authorName: String = "",
 )
 
 data class AiCategoryProfile(
@@ -117,10 +107,34 @@ data class AiClassificationRunResult(
     val skippedReason: String? = null,
 )
 
-data class AiSeedCategory(
-    val name: String,
-    val noteIds: List<String>,
+data class StructuredClassificationResult(
+    val noteId: String,
+    val primaryCategoryId: String,
+    val primaryConfidence: Double,
+    val dimension: String?,
+    val dimensionValue: String?,
+    val existingSecondaryCategoryId: String?,
+    val tags: List<String>,
+    val reason: String,
 )
 
-const val DEFAULT_EMBEDDING_BASE_URL = "https://api.chatanywhere.tech/v1"
+data class ValidatedClassification(
+    val noteId: String,
+    val primaryCategoryId: String,
+    val primaryConfidence: Double,
+    val dimension: String?,
+    val dimensionValue: String?,
+    val existingSecondaryCategoryId: String?,
+    val tags: List<String>,
+    val reason: String,
+)
+
+data class SecondaryCategoryCandidate(
+    val name: String,
+    val dimension: String,
+    val noteIds: List<String>,
+    val sourceKeys: List<String>,
+    val confidence: Double,
+)
+
 const val DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"

@@ -272,7 +272,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         val netChange = home.categories.activeCount() - it.syncStartActiveCount
                         val changedIds = it.incrementalAiNoteIds
-                        val willMatch = result.success && changedIds.isNotEmpty() && it.aiSettings.embeddingEnabled
+                        val willMatch = result.success && changedIds.isNotEmpty() && it.aiSettings.smartClassificationEnabled
                         it.copy(
                             rednoteSyncRequested = false,
                             isSyncing = false,
@@ -283,7 +283,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             searchableNotes = home.searchableNotes,
                             message = if (result.success) {
                                 if (willMatch) {
-                                    "同步完成，正在把新增笔记匹配到现有分类..."
+                                    "同步完成，正在整理新增笔记..."
                                 } else {
                                     syncNetMessage(netChange)
                                 }
@@ -294,8 +294,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     if (result.success) {
                         val changedIds = _uiState.value.incrementalAiNoteIds
-                        if (changedIds.isNotEmpty() && _uiState.value.aiSettings.embeddingEnabled) {
-                            runIncrementalMatch(changedIds)
+                        if (changedIds.isNotEmpty() && _uiState.value.aiSettings.smartClassificationEnabled) {
+                            runIncrementalClassification(changedIds)
                         } else {
                             _uiState.update { it.copy(incrementalAiNoteIds = emptySet()) }
                         }
@@ -322,7 +322,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     categories = home.categories,
                     suggestions = home.suggestions,
                     searchableNotes = home.searchableNotes,
-                    message = "已创建分类：$name",
+                    message = "待整理不能直接创建一级分类，请先完成受限分类",
                 )
             }
         }
@@ -494,15 +494,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 同步后的增量路径：新增笔记与现有分类做 embedding 相似度匹配 */
-    private fun runIncrementalMatch(noteIds: Set<String>) {
+    /** 同步后的增量路径：只对新增/恢复笔记执行受限结构化分类。 */
+    private fun runIncrementalClassification(noteIds: Set<String>) {
         viewModelScope.launch {
-            runCatching { repository.runIncrementalEmbeddingMatch(noteIds) }
+            runCatching { repository.runIncrementalClassification(noteIds) }
                 .onSuccess { result ->
                     finishClassification(incrementalMatchMessage(result, noteIds.size))
                 }
                 .onFailure { error ->
-                    failClassification("增量匹配失败：${error.message ?: "接口异常"}，新增笔记已放入待整理")
+                    failClassification("增量分类失败：${error.message ?: "接口异常"}，新增笔记已放入待整理")
                 }
         }
     }
@@ -594,9 +594,9 @@ private fun incrementalMatchMessage(result: AiClassificationRunResult, total: In
     result.skippedReason?.let { return it }
     val unmatched = (total - result.matched).coerceAtLeast(0)
     return if (unmatched > 0) {
-        "已同步：${result.matched} 条匹配到现有分类，$unmatched 条在待整理"
+        "已同步：${result.matched} 条完成分类，$unmatched 条在待整理"
     } else {
-        "已同步：${result.matched} 条匹配到现有分类"
+        "已同步：${result.matched} 条完成分类"
     }
 }
 

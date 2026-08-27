@@ -13,12 +13,13 @@ import java.io.BufferedReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
-import kotlin.math.sqrt
+import java.security.MessageDigest
 
 class AppRepository(context: Context) {
     private val appContext = context.applicationContext
     private val db = LocalDatabase(context.applicationContext)
     private val preferences = appContext.getSharedPreferences("ai_classification", Context.MODE_PRIVATE)
+    private val secureApiKeyStore = SecureApiKeyStore(appContext)
 
     suspend fun loadHome(): HomeData = withContext(Dispatchers.IO) {
         HomeData(
@@ -66,31 +67,22 @@ class AppRepository(context: Context) {
     }
 
     fun loadAiSettings(): AiClassificationSettings {
-        val toleranceName = preferences.getString(KEY_TOLERANCE, AiClassificationTolerance.BALANCED.name).orEmpty()
-        val tolerance = AiClassificationTolerance.entries.firstOrNull { it.name == toleranceName }
-            ?: AiClassificationTolerance.BALANCED
+        var apiKey = secureApiKeyStore.read()
+        if (apiKey.isBlank()) {
+            apiKey = preferences.getString(KEY_DEEPSEEK_API_KEY, "").orEmpty()
+            if (apiKey.isNotBlank()) {
+                secureApiKeyStore.write(apiKey)
+                preferences.edit().remove(KEY_DEEPSEEK_API_KEY).apply()
+            }
+        }
         return AiClassificationSettings(
-            deepSeekApiKey = preferences.getString(KEY_DEEPSEEK_API_KEY, "").orEmpty(),
-            embeddingApiKey = preferences.getString(KEY_EMBEDDING_API_KEY, "").orEmpty(),
-            embeddingBaseUrl = preferences.getString(KEY_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_BASE_URL).orEmpty()
-                .ifBlank { DEFAULT_EMBEDDING_BASE_URL },
-            tolerance = tolerance,
-            customSplitThreshold = preferences.getInt(KEY_SPLIT_THRESHOLD, tolerance.splitThreshold),
-            customMatchThreshold = Double.fromBits(
-                preferences.getLong(KEY_MATCH_THRESHOLD, tolerance.matchThreshold.toBits()),
-            ),
+            deepSeekApiKey = apiKey,
         )
     }
 
     fun saveAiSettings(settings: AiClassificationSettings) {
-        preferences.edit()
-            .putString(KEY_DEEPSEEK_API_KEY, settings.deepSeekApiKey.trim())
-            .putString(KEY_EMBEDDING_API_KEY, settings.embeddingApiKey.trim())
-            .putString(KEY_EMBEDDING_BASE_URL, settings.embeddingBaseUrl.trim().ifBlank { DEFAULT_EMBEDDING_BASE_URL })
-            .putString(KEY_TOLERANCE, settings.tolerance.name)
-            .putInt(KEY_SPLIT_THRESHOLD, settings.customSplitThreshold.coerceIn(10, 200))
-            .putLong(KEY_MATCH_THRESHOLD, settings.customMatchThreshold.coerceIn(0.1, 0.95).toBits())
-            .apply()
+        secureApiKeyStore.write(settings.deepSeekApiKey)
+        preferences.edit().remove(KEY_DEEPSEEK_API_KEY).apply()
     }
 
     suspend fun runRuleClassification(noteIds: Set<String>? = null): Int = withContext(Dispatchers.IO) {
@@ -98,7 +90,7 @@ class AppRepository(context: Context) {
     }
 
     /**
-     * 分类按钮触发：把待整理/未分类笔记按固定粗分类归类，然后对超过阈值且有裂变约束的粗分类做裂变。
+     * 分类按钮触发：使用固定一级枚举完成结构化分类，再执行受控二级分类门控。
      */
     suspend fun runCoarseClassification(): AiClassificationRunResult = withContext(Dispatchers.IO) {
         val settings = loadAiSettings()
@@ -106,17 +98,21 @@ class AppRepository(context: Context) {
             logAi("粗分类跳过：未配置 DeepSeek API Key")
             return@withContext AiClassificationRunResult(skippedReason = "未配置 API Key，已使用固定分类词分类")
         }
-        db.ensureCoarseCategories(CoarseTaxonomy.categories)
+        db.ensurePrimaryCategories(ClassificationTaxonomy.primaryCategories)
         val notes = db.aiNotesForCoarseClassification()
         logAi("粗分类开始：待分类笔记=${notes.size}")
         var matched = 0
         if (notes.isNotEmpty()) {
-            ensureKeywordCache(settings, notes)
             db.aiNotesForCoarseClassification().chunked(COARSE_BATCH_SIZE).forEach { batch ->
                 runCatching {
-                    val assignments = requestCoarseAssignments(settings, batch)
-                    matched += db.assignNotesToCategories(assignments)
+                    val classifications = classifyWithCache(settings, batch)
+                    matched += db.applyClassifications(classifications)
+                    db.markPendingClassification(
+                        batch.map(AiNote::rednoteId).toSet() - classifications.map(ValidatedClassification::noteId).toSet(),
+                        "low_confidence_or_invalid_response",
+                    )
                 }.onFailure {
+                    db.markPendingClassification(batch.map(AiNote::rednoteId).toSet(), "model_request_failed")
                     Log.w(AI_LOG_TAG, "粗分类批次失败：batch=${batch.size}", it)
                 }
             }
@@ -127,32 +123,34 @@ class AppRepository(context: Context) {
     }
 
     /**
-     * 同步按钮的增量路径：已有分类时，把新增笔记的摘要与现有分类做 embedding 相似度匹配。
-     * 低于阈值的笔记留在待整理，等下次点击分类按钮。
+     * 同步后的增量路径与首次分类使用相同的固定枚举和 schema 校验。
+     * 只处理本次新增/恢复笔记，不移动已有稳定结果。
      */
-    suspend fun runIncrementalEmbeddingMatch(noteIds: Set<String>): AiClassificationRunResult = withContext(Dispatchers.IO) {
+    suspend fun runIncrementalClassification(noteIds: Set<String>): AiClassificationRunResult = withContext(Dispatchers.IO) {
         val settings = loadAiSettings()
-        if (!settings.embeddingEnabled) {
-            logAi("增量匹配跳过：未配置 Embedding Key")
-            return@withContext AiClassificationRunResult(skippedReason = "未配置 Embedding Key，新增笔记已放入待整理")
+        if (!settings.smartClassificationEnabled) {
+            logAi("增量分类跳过：未配置 DeepSeek API Key")
+            return@withContext AiClassificationRunResult(skippedReason = "未配置 DeepSeek API Key，新增笔记已放入待整理")
         }
-        val categories = db.aiCategoryProfiles()
-        if (categories.isEmpty()) {
-            logAi("增量匹配跳过：暂无分类")
-            return@withContext AiClassificationRunResult(skippedReason = "暂无分类，请先点击“分类”整理收藏")
-        }
+        db.ensurePrimaryCategories(ClassificationTaxonomy.primaryCategories)
         val notes = db.aiNotesForCoarseClassification(noteIds)
         if (notes.isEmpty()) return@withContext AiClassificationRunResult()
-        logAi("增量匹配开始：notes=${notes.size}，categories=${categories.size}")
+        logAi("增量分类开始：notes=${notes.size}")
         var matched = 0
-        notes.chunked(EMBEDDING_NOTE_BATCH).forEach { batch ->
+        notes.chunked(COARSE_BATCH_SIZE).forEach { batch ->
             runCatching {
-                matched += matchNotesByEmbedding(settings, batch, categories)
+                val classifications = classifyWithCache(settings, batch)
+                matched += db.applyClassifications(classifications)
+                db.markPendingClassification(
+                    batch.map(AiNote::rednoteId).toSet() - classifications.map(ValidatedClassification::noteId).toSet(),
+                    "low_confidence_or_invalid_response",
+                )
             }.onFailure {
-                Log.w(AI_LOG_TAG, "增量匹配批次失败：batch=${batch.size}", it)
+                db.markPendingClassification(batch.map(AiNote::rednoteId).toSet(), "model_request_failed")
+                Log.w(AI_LOG_TAG, "增量分类批次失败：batch=${batch.size}", it)
             }
         }
-        logAi("增量匹配结束：matched=$matched，unmatched=${notes.size - matched}")
+        logAi("增量分类结束：matched=$matched，pending=${notes.size - matched}")
         AiClassificationRunResult(matched = matched)
     }
 
@@ -316,18 +314,57 @@ class AppRepository(context: Context) {
         return emptyList()
     }
 
-    /** 粗分类：把一批笔记分到固定分类体系中。 */
-    private fun requestCoarseAssignments(
+    /** DeepSeek 结构化输出在写库前必须通过固定枚举、置信度和维度校验。 */
+    private fun classifyWithCache(
         settings: AiClassificationSettings,
         notes: List<AiNote>,
-    ): Map<String, Pair<String, Double>> {
+    ): List<ValidatedClassification> {
+        val categoryContext = ClassificationTaxonomy.primaryCategories.joinToString("|") { primary ->
+            val secondaries = db.secondaryCategories(primary.id).joinToString(",") { "${it.id}:${it.name}" }
+            "${primary.id}[$secondaries]"
+        }
+        val fingerprints = notes.associate { note -> note.rednoteId to note.inputFingerprint(categoryContext) }
+        val cached = notes.mapNotNull { note ->
+            db.classificationCache(fingerprints.getValue(note.rednoteId), CLASSIFICATION_RULE_VERSION, DEEPSEEK_MODEL)
+                ?.let(::validatedClassificationFromJson)
+                ?.takeIf { it.noteId == note.rednoteId }
+        }
+        val cachedIds = cached.map(ValidatedClassification::noteId).toSet()
+        val uncached = notes.filterNot { it.rednoteId in cachedIds }
+        val fresh = if (uncached.isEmpty()) {
+            emptyList()
+        } else {
+            requestConstrainedAssignments(settings, uncached)
+        }
+        fresh.forEach { classification ->
+            db.storeClassificationCache(
+                inputFingerprint = fingerprints.getValue(classification.noteId),
+                ruleVersion = CLASSIFICATION_RULE_VERSION,
+                modelVersion = DEEPSEEK_MODEL,
+                structuredResult = classification.toJson().toString(),
+                status = "valid",
+            )
+        }
+        return cached + fresh
+    }
+
+    private fun requestConstrainedAssignments(
+        settings: AiClassificationSettings,
+        notes: List<AiNote>,
+    ): List<ValidatedClassification> {
         val categoryJson = JSONArray()
-        CoarseTaxonomy.categories.forEach { def ->
+        ClassificationTaxonomy.primaryCategories.forEach { def ->
+            val secondaryJson = JSONArray()
+            db.secondaryCategories(def.id).forEach { secondary ->
+                secondaryJson.put(JSONObject().put("id", secondary.id).put("name", secondary.name))
+            }
             categoryJson.put(
                 JSONObject()
                     .put("id", def.id)
                     .put("name", def.name)
-                    .put("desc", def.description),
+                    .put("desc", def.description)
+                    .put("allowedDimensions", JSONArray(def.allowedDimensions.toList()))
+                    .put("existingSecondaryCategories", secondaryJson),
             )
         }
         val noteJson = JSONArray()
@@ -336,12 +373,14 @@ class AppRepository(context: Context) {
                 JSONObject()
                     .put("id", note.rednoteId)
                     .put("title", note.title.take(80))
-                    .put("keywords", note.aiKeywords.ifBlank { note.desc.take(120) }),
+                    .put("summary", note.desc.take(180)),
             )
         }
         val body = JSONObject()
             .put("model", DEEPSEEK_MODEL)
             .put("temperature", 0.1)
+            .put("max_tokens", 4096)
+            .put("response_format", JSONObject().put("type", "json_object"))
             .put(
                 "messages",
                 JSONArray()
@@ -350,8 +389,12 @@ class AppRepository(context: Context) {
                             .put("role", "system")
                             .put(
                                 "content",
-                                "你是小红书收藏笔记分类助手。请把每条笔记分到给定的固定分类之一（返回分类 id），" +
-                                    "实在无法判断的分到“其他”。只输出 JSON：{\"assignments\":[{\"noteId\":\"\",\"categoryId\":\"\"}]}",
+                                "你是收藏笔记分类助手。一级分类只能从给定 id 中选择；“其他”是有把握不属于十个主题时的正式分类。" +
+                                    "置信度不足也必须如实返回，客户端会放入待整理。dimension 只能从对应 allowedDimensions 中选择，也可为空；" +
+                                    "existingSecondaryCategoryId 只能选择对应一级下给定的现有二级 id，不确定时返回 null。" +
+                                    "标签用于表达地点、对象、场景、动作和意图；好物、礼物不能作为一级分类，应按商品主题分类并加标签。" +
+                                    "只输出 json 格式：{\"assignments\":[{\"noteId\":\"\",\"primaryCategoryId\":\"\",\"primaryConfidence\":0.0," +
+                                    "\"dimension\":null,\"dimensionValue\":null,\"existingSecondaryCategoryId\":null,\"tags\":[],\"reason\":\"\"}]}",
                             ),
                     )
                     .put(
@@ -367,18 +410,26 @@ class AppRepository(context: Context) {
             body = body,
         )
         val content = responseContent(response)
-        logAi("DeepSeek 粗分类原始返回：notes=${notes.size}，content=${content.take(1200)}")
         val json = JSONObject(extractJsonObject(content))
         val validNoteIds = notes.map { it.rednoteId }.toSet()
         val assignmentsJson = json.optJSONArray("assignments") ?: JSONArray()
-        val assignments = mutableMapOf<String, Pair<String, Double>>()
+        val assignments = mutableListOf<ValidatedClassification>()
+        val usedNoteIds = mutableSetOf<String>()
         for (index in 0 until assignmentsJson.length()) {
             val item = assignmentsJson.optJSONObject(index) ?: continue
             val noteId = item.optString("noteId")
-            val categoryId = item.optString("categoryId")
-            if (noteId in validNoteIds && CoarseTaxonomy.byId.containsKey(categoryId)) {
-                assignments[noteId] = categoryId to COARSE_ASSIGN_CONFIDENCE
-            }
+            if (noteId !in validNoteIds || !usedNoteIds.add(noteId)) continue
+            val raw = StructuredClassificationResult(
+                noteId = noteId,
+                primaryCategoryId = item.optString("primaryCategoryId"),
+                primaryConfidence = item.optDouble("primaryConfidence", -1.0),
+                dimension = item.optNullableString("dimension"),
+                dimensionValue = item.optNullableString("dimensionValue"),
+                existingSecondaryCategoryId = item.optNullableString("existingSecondaryCategoryId"),
+                tags = item.optJSONArray("tags").toStringList(),
+                reason = item.optString("reason"),
+            )
+            ConstrainedClassificationPolicy.validate(raw)?.let(assignments::add)
         }
         return assignments
     }
@@ -389,15 +440,26 @@ class AppRepository(context: Context) {
         db.aiCategoryProfiles()
             .filter { it.id == it.coarseId }
             .forEach { category ->
-                val def = CoarseTaxonomy.byId[category.coarseId] ?: return@forEach
+                val def = ClassificationTaxonomy.byId[category.coarseId] ?: return@forEach
+                val parentActiveCount = db.activeNoteCountInPrimary(category.id)
                 if (def.fissionHint.isBlank()) return@forEach
-                if (category.count <= settings.customSplitThreshold) return@forEach
-                logAi("裂变开始：category=${category.name}，count=${category.count}，hint=${def.fissionHint}")
+                if (category.count < ConstrainedClassificationPolicy.minimumCandidateCount(parentActiveCount)) return@forEach
+                logAi("裂变开始：category=${category.name}，count=$parentActiveCount，hint=${def.fissionHint}")
                 runCatching {
-                    ensureKeywordCache(settings, db.aiNotesInCategory(category.id))
                     val notes = db.aiNotesInCategory(category.id)
-                    val groups = requestConstrainedFission(settings, category.name, def.fissionHint, notes)
-                    val created = db.splitCategoryInto(category.id, groups)
+                    val acceptedNames = db.secondaryCategories(category.id).map(Category::name).toMutableList()
+                    val groups = requestConstrainedFission(settings, def, notes)
+                        .filter { candidate ->
+                            val accepted = ConstrainedClassificationPolicy.canCreateSecondary(
+                                parent = def,
+                                parentActiveCount = parentActiveCount,
+                                existingSecondaryNames = acceptedNames,
+                                candidate = candidate,
+                            )
+                            if (accepted) acceptedNames += candidate.name
+                            accepted
+                        }
+                    val created = db.createSecondaryCategories(category.id, groups)
                     splitCount += created
                     logAi("裂变完成：category=${category.name}，细分分类=$created")
                 }.onFailure {
@@ -410,23 +472,23 @@ class AppRepository(context: Context) {
     /** 带约束的裂变请求：把裂变提示词（按地点/商圈/菜系等）拼进 prompt。 */
     private fun requestConstrainedFission(
         settings: AiClassificationSettings,
-        categoryName: String,
-        fissionHint: String,
+        category: PrimaryCategoryDef,
         notes: List<AiNote>,
-    ): List<AiSeedCategory> {
+    ): List<SecondaryCategoryCandidate> {
         val noteJson = JSONArray()
         notes.forEach { note ->
             noteJson.put(
                 JSONObject()
                     .put("id", note.rednoteId)
                     .put("title", note.title.take(80))
-                    .put("desc", note.desc.take(160))
-                    .put("keywords", note.aiKeywords),
+                    .put("desc", note.desc.take(160)),
             )
         }
         val body = JSONObject()
             .put("model", DEEPSEEK_MODEL)
             .put("temperature", 0.2)
+            .put("max_tokens", 4096)
+            .put("response_format", JSONObject().put("type", "json_object"))
             .put(
                 "messages",
                 JSONArray()
@@ -435,28 +497,27 @@ class AppRepository(context: Context) {
                             .put("role", "system")
                             .put(
                                 "content",
-                                "你是小红书收藏笔记细分助手。分类「$categoryName」笔记过多，需要裂变为更具体的细分分类。" +
-                                    "细分约束：$fissionHint。生成 2 到 $MAX_FISSION_GROUPS 个细分分类，分类名要短且具体，符合约束中的命名方式；" +
+                                "你是收藏笔记细分助手。分类「${category.name}」只能按 ${category.fissionHint}。" +
+                                    "dimension 只能是 ${category.allowedDimensions.joinToString()}。生成不超过 $MAX_FISSION_GROUPS 个短且具体的候选；" +
                                     "把能明确归入某个细分分类的笔记 id 分进去，无法明确细分的笔记不要返回其 id（它们会留在原分类）。" +
-                                    "只输出 JSON：{\"categories\":[{\"name\":\"\",\"ids\":[\"\"]}]}",
+                                    "只输出 json 格式：{\"categories\":[{\"name\":\"\",\"dimension\":\"\",\"confidence\":0.0,\"ids\":[\"\"]}]}",
                             ),
                     )
                     .put(
                         JSONObject()
                             .put("role", "user")
-                            .put("content", JSONObject().put("category", categoryName).put("notes", noteJson).toString()),
+                            .put("content", JSONObject().put("category", category.name).put("notes", noteJson).toString()),
                     ),
             )
         val response = postJson(
             url = "$DEFAULT_DEEPSEEK_BASE_URL/chat/completions",
-            label = "DeepSeek 约束裂变 category=$categoryName",
+            label = "DeepSeek 约束裂变 category=${category.name}",
             apiKey = settings.deepSeekApiKey,
             body = body,
         )
         val content = responseContent(response)
-        logAi("DeepSeek 裂变原始返回：category=$categoryName，content=${content.take(1200)}")
         val json = JSONObject(extractJsonObject(content))
-        val validIds = notes.map { it.rednoteId }.toSet()
+        val notesById = notes.associateBy(AiNote::rednoteId)
         val categoriesJson = json.optJSONArray("categories") ?: JSONArray()
         val usedIds = mutableSetOf<String>()
         return buildList {
@@ -464,128 +525,22 @@ class AppRepository(context: Context) {
                 val item = categoriesJson.optJSONObject(index) ?: continue
                 val name = item.optString("name").trim()
                 val ids = item.optJSONArray("ids").toStringList()
-                    .filter { it in validIds && it !in usedIds }
+                    .filter { it in notesById && it !in usedIds }
                     .distinct()
                 if (name.isNotBlank() && ids.isNotEmpty()) {
                     usedIds += ids
-                    add(AiSeedCategory(name = name, noteIds = ids))
+                    add(
+                        SecondaryCategoryCandidate(
+                            name = name,
+                            dimension = item.optString("dimension"),
+                            noteIds = ids,
+                            sourceKeys = ids.mapNotNull { notesById[it]?.authorName }.filter(String::isNotBlank),
+                            confidence = item.optDouble("confidence", 0.0),
+                        ),
+                    )
                 }
             }
         }.take(MAX_FISSION_GROUPS)
-    }
-
-    /** embedding 增量匹配：笔记摘要 vs 现有分类，命中阈值才归类。 */
-    private fun matchNotesByEmbedding(
-        settings: AiClassificationSettings,
-        notes: List<AiNote>,
-        categories: List<AiCategoryProfile>,
-    ): Int {
-        val categoryInputs = categories.map { "${it.name} ${it.sampleText.take(160)}".trim() }
-        val inputs = notes.map { it.summaryEmbeddingText() } + categoryInputs
-        val vectors = requestEmbeddings(settings, inputs)
-        if (vectors.size != inputs.size) return 0
-        val noteVectors = vectors.take(notes.size)
-        val categoryVectors = vectors.drop(notes.size)
-        val assignments = mutableMapOf<String, Pair<String, Double>>()
-        notes.forEachIndexed { noteIndex, note ->
-            val best = categories.mapIndexed { categoryIndex, category ->
-                category to cosine(noteVectors[noteIndex], categoryVectors[categoryIndex])
-            }.maxByOrNull { it.second }
-            logAi("增量匹配：note=${note.rednoteId}，best=${best?.first?.name ?: "none"}，confidence=${best?.second ?: 0.0}，threshold=${settings.customMatchThreshold}")
-            if (best != null && best.second >= settings.customMatchThreshold) {
-                assignments[note.rednoteId] = best.first.id to best.second
-            }
-        }
-        return db.assignNotesToCategories(assignments)
-    }
-
-    private fun ensureKeywordCache(settings: AiClassificationSettings, notes: List<AiNote>): Int {
-        val missingKeywordNotes = notes.filter { it.aiKeywords.isBlank() }
-        if (missingKeywordNotes.isEmpty()) return 0
-        var updated = 0
-        missingKeywordNotes.chunked(KEYWORD_BATCH_SIZE).forEach { batch ->
-            logAi("补齐关键词：batch=${batch.size}，ids=${batch.joinToString { it.rednoteId }.take(300)}")
-            updated += db.updateAiKeywords(requestNoteKeywords(settings, batch))
-        }
-        logAi("关键词补齐完成：missing=${missingKeywordNotes.size}，updated=$updated")
-        return updated
-    }
-
-    private fun requestEmbeddings(settings: AiClassificationSettings, inputs: List<String>): List<List<Double>> {
-        if (!settings.embeddingEnabled) return emptyList()
-        logAi("请求 Embedding：inputs=${inputs.size}")
-        val body = JSONObject()
-            .put("model", EMBEDDING_MODEL)
-            .put("input", JSONArray(inputs))
-        val response = postJson(
-            url = "${settings.embeddingBaseUrl.trimEnd('/')}/embeddings",
-            label = "Embedding inputs=${inputs.size}",
-            apiKey = settings.embeddingApiKey,
-            body = body,
-        )
-        val data = response.optJSONArray("data") ?: JSONArray()
-        return buildList {
-            for (index in 0 until data.length()) {
-                val embedding = data.optJSONObject(index)?.optJSONArray("embedding") ?: continue
-                add(buildList {
-                    for (valueIndex in 0 until embedding.length()) {
-                        add(embedding.optDouble(valueIndex))
-                    }
-                })
-            }
-        }.also { logAi("Embedding 返回：vectors=${it.size}") }
-    }
-
-    private fun requestNoteKeywords(settings: AiClassificationSettings, notes: List<AiNote>): Map<String, String> {
-        val noteJson = JSONArray()
-        notes.forEach { note ->
-            noteJson.put(
-                JSONObject()
-                    .put("id", note.rednoteId)
-                    .put("title", note.title.take(120))
-                    .put("desc", note.desc.take(280)),
-            )
-        }
-        val body = JSONObject()
-            .put("model", DEEPSEEK_MODEL)
-            .put("temperature", 0.1)
-            .put(
-                "messages",
-                JSONArray()
-                    .put(
-                        JSONObject()
-                            .put("role", "system")
-                            .put(
-                                "content",
-                                "你是收藏笔记分类关键词提取器。根据每条笔记的标题和摘要提取 3 到 8 个适合分类归档的中文关键词或短语，忽略语气词、泛泛评价和无关细节。只输出 JSON：{\"notes\":[{\"id\":\"\",\"keywords\":[\"\"]}]}",
-                            ),
-                    )
-                    .put(JSONObject().put("role", "user").put("content", JSONObject().put("notes", noteJson).toString())),
-            )
-        val response = postJson(
-            url = "$DEFAULT_DEEPSEEK_BASE_URL/chat/completions",
-            label = "DeepSeek 关键词 notes=${notes.size}",
-            apiKey = settings.deepSeekApiKey,
-            body = body,
-        )
-        val content = responseContent(response)
-        logAi("DeepSeek 关键词原始返回：notes=${notes.size}，content=${content.take(1200)}")
-        val json = JSONObject(extractJsonObject(content))
-        val result = mutableMapOf<String, String>()
-        val responseNotes = json.optJSONArray("notes") ?: JSONArray()
-        for (index in 0 until responseNotes.length()) {
-            val item = responseNotes.optJSONObject(index) ?: continue
-            val id = item.optString("id")
-            val keywords = item.optJSONArray("keywords").toStringList()
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .take(8)
-            if (id.isNotBlank() && keywords.isNotEmpty()) {
-                result[id] = keywords.joinToString(" ")
-            }
-        }
-        return result
     }
 
     private fun responseContent(response: JSONObject): String {
@@ -597,7 +552,7 @@ class AppRepository(context: Context) {
     }
 
     private fun postJson(url: String, label: String, apiKey: String, body: JSONObject): JSONObject {
-        logAi("请求开始：$label，url=$url，body=${body.toString().take(1200)}")
+        logAi("请求开始：$label")
         val startAt = System.currentTimeMillis()
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -612,15 +567,18 @@ class AppRepository(context: Context) {
         }
         val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
         val text = stream.bufferedReader().use(BufferedReader::readText)
-        logAi("请求结束：$label，code=${connection.responseCode}，cost=${System.currentTimeMillis() - startAt}ms，response=${text.take(1500)}")
+        logAi("请求结束：$label，code=${connection.responseCode}，cost=${System.currentTimeMillis() - startAt}ms")
         if (connection.responseCode !in 200..299) {
-            error("AI 接口请求失败：${connection.responseCode} ${text.take(180)}")
+            error("AI 接口请求失败：HTTP ${connection.responseCode}")
         }
         return JSONObject(text)
     }
 
-    private fun AiNote.summaryEmbeddingText(): String {
-        return aiKeywords.ifBlank { "${title.take(80)} ${desc.take(160)}" }.trim()
+    private fun AiNote.inputFingerprint(categoryContext: String): String {
+        val input = listOf(rednoteId, title, desc, categoryContext).joinToString("\u001F")
+        return MessageDigest.getInstance("SHA-256")
+            .digest(input.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
     }
 }
 
@@ -653,19 +611,36 @@ private fun JSONArray?.toStringList(): List<String> {
     }
 }
 
-private fun cosine(left: List<Double>, right: List<Double>): Double {
-    if (left.isEmpty() || left.size != right.size) return 0.0
-    var dot = 0.0
-    var leftNorm = 0.0
-    var rightNorm = 0.0
-    left.indices.forEach { index ->
-        dot += left[index] * right[index]
-        leftNorm += left[index] * left[index]
-        rightNorm += right[index] * right[index]
-    }
-    if (leftNorm == 0.0 || rightNorm == 0.0) return 0.0
-    return dot / (sqrt(leftNorm) * sqrt(rightNorm))
+private fun JSONObject.optNullableString(name: String): String? {
+    if (isNull(name)) return null
+    return optString(name).trim().takeIf(String::isNotBlank)
 }
+
+private fun ValidatedClassification.toJson(): JSONObject = JSONObject()
+    .put("noteId", noteId)
+    .put("primaryCategoryId", primaryCategoryId)
+    .put("primaryConfidence", primaryConfidence)
+    .put("dimension", dimension)
+    .put("dimensionValue", dimensionValue)
+    .put("existingSecondaryCategoryId", existingSecondaryCategoryId)
+    .put("tags", JSONArray(tags))
+    .put("reason", reason)
+
+private fun validatedClassificationFromJson(raw: String): ValidatedClassification? = runCatching {
+    val item = JSONObject(raw)
+    ConstrainedClassificationPolicy.validate(
+        StructuredClassificationResult(
+            noteId = item.optString("noteId"),
+            primaryCategoryId = item.optString("primaryCategoryId"),
+            primaryConfidence = item.optDouble("primaryConfidence", -1.0),
+            dimension = item.optNullableString("dimension"),
+            dimensionValue = item.optNullableString("dimensionValue"),
+            existingSecondaryCategoryId = item.optNullableString("existingSecondaryCategoryId"),
+            tags = item.optJSONArray("tags").toStringList(),
+            reason = item.optString("reason"),
+        ),
+    )
+}.getOrNull()
 
 private fun extractJsonObject(raw: String): String {
     val start = raw.indexOf('{')
@@ -678,17 +653,9 @@ private fun logAi(message: String) {
     Log.d(AI_LOG_TAG, message)
 }
 
-private const val EMBEDDING_MODEL = "text-embedding-3-small"
 private const val DEEPSEEK_MODEL = "deepseek-v4-flash"
+private const val CLASSIFICATION_RULE_VERSION = "adr-0001-v1"
 private const val AI_LOG_TAG = "JiShiAiClassifier"
 private const val KEY_DEEPSEEK_API_KEY = "deepseek_api_key"
-private const val KEY_EMBEDDING_API_KEY = "embedding_api_key"
-private const val KEY_EMBEDDING_BASE_URL = "embedding_base_url"
-private const val KEY_TOLERANCE = "tolerance"
-private const val KEY_SPLIT_THRESHOLD = "split_threshold"
-private const val KEY_MATCH_THRESHOLD = "match_threshold"
-private const val KEYWORD_BATCH_SIZE = 12
 private const val COARSE_BATCH_SIZE = 20
-private const val EMBEDDING_NOTE_BATCH = 16
 private const val MAX_FISSION_GROUPS = 6
-private const val COARSE_ASSIGN_CONFIDENCE = 0.85

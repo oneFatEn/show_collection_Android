@@ -2,6 +2,8 @@
 
 日期：2026-06-22
 
+> 分类决策更新（2026-08-27）：本文记录的 embedding 分类与自由聚类属于历史调研，不再是目标方案。当前决策见 [`../002-constrained-auto-classification/spec.md`](../002-constrained-auto-classification/spec.md) 与 [`ADR-0001`](../../docs/adr/0001-constrained-hierarchical-classification.md)。
+
 ## Spec Coding 调研
 
 GitHub Spec Kit 的核心观点是把规格作为主产物，代码服务于规格。推荐流程是：

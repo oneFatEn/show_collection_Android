@@ -13,10 +13,16 @@
 
 - 获取用户收藏笔记。
 - 按文案、标题、标签和封面进行分类。
-- 使用 LLM 或 embedding 模型辅助整理。
+- 使用 LLM 完成固定一级、受控二级与多标签整理。
 - 在移动端以分类列表、笔记预览和搜索的形式展示。
 
 项目仍处于探索和规划阶段，具体能力、交互和技术实现会随着验证结果持续调整。
+
+## 核心文档
+
+- [受控层级自动分类需求规格](spec/002-constrained-auto-classification/spec.md)
+- [ADR-0001：采用受控层级自动分类](docs/adr/0001-constrained-hierarchical-classification.md)
+- [小红书收藏管理 App 总规格](spec/001-rednote-collection-app/spec.md)
 
 ## 初始化项目
 

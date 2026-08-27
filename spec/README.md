@@ -17,3 +17,8 @@
 ## 当前规格
 
 - `001-rednote-collection-app/`：小红书登录态获取、收藏同步、动态分类和文件夹式展示。
+- `002-constrained-auto-classification/`：固定一级分类、受控二级裂变、多标签和增量稳定策略。该规格取代 `001` 中基于 embedding 相似度的分类决策。
+
+## 架构决策
+
+- [`docs/adr/0001-constrained-hierarchical-classification.md`](../docs/adr/0001-constrained-hierarchical-classification.md)：采用受控层级自动分类，禁止相似度驱动类别生长。

@@ -2,6 +2,8 @@
 
 日期：2026-06-22
 
+> 分类方案更新（2026-08-27）：本文中涉及 embedding 匹配、自由冷启动分类和按单一数量阈值裂变的内容已被 [`../002-constrained-auto-classification/spec.md`](../002-constrained-auto-classification/spec.md) 与 [`ADR-0001`](../../docs/adr/0001-constrained-hierarchical-classification.md) 取代。同步、存储和 WebView 方案仍然有效。
+
 ## 目标
 
 构建一个 Android 本地优先 App，让用户通过 WebView 登录小红书，同步自己的收藏笔记，自动分类并以文件夹式界面浏览，点击笔记可跳回小红书。

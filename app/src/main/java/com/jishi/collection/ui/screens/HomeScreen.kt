@@ -112,7 +112,6 @@ fun HomeScreen(state: AppUiState, actions: AppActions) {
                 CategoryListItem(
                     category = category,
                     onOpen = { actions.openCategory(category) },
-                    onEdit = { actions.editCategory(category.id) },
                 )
             }
 

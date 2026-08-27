@@ -34,7 +34,6 @@ import com.jishi.collection.AppActions
 import com.jishi.collection.AppScreen
 import com.jishi.collection.AppUiState
 import com.jishi.collection.AiClassificationSettings
-import com.jishi.collection.AiClassificationTolerance
 import com.jishi.collection.ui.components.MessageBar
 import com.jishi.collection.ui.theme.JiShiColors
 
@@ -81,13 +80,7 @@ private fun isSyncDisplayMessage(message: String): Boolean {
 @Composable
 private fun AiClassificationSettingsPanel(state: AppUiState, actions: AppActions) {
     var deepSeekKey by remember(state.aiSettings) { mutableStateOf(state.aiSettings.deepSeekApiKey) }
-    var embeddingKey by remember(state.aiSettings) { mutableStateOf(state.aiSettings.embeddingApiKey) }
-    var embeddingBaseUrl by remember(state.aiSettings) { mutableStateOf(state.aiSettings.embeddingBaseUrl) }
-    var tolerance by remember(state.aiSettings) { mutableStateOf(state.aiSettings.tolerance) }
-    var splitThreshold by remember(state.aiSettings) { mutableStateOf(state.aiSettings.customSplitThreshold.toString()) }
-    var matchThreshold by remember(state.aiSettings) { mutableStateOf(state.aiSettings.customMatchThreshold.toString()) }
     val smartEnabled = deepSeekKey.isNotBlank()
-    val embeddingEnabled = embeddingKey.isNotBlank()
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -99,7 +92,7 @@ private fun AiClassificationSettingsPanel(state: AppUiState, actions: AppActions
         Spacer(Modifier.height(12.dp))
         Text(
             text = if (smartEnabled) {
-                "保存后在首页点击“分类”做粗分类与裂变；配置 Embedding 后，同步会把新增笔记自动匹配到现有分类"
+                "同步后使用固定一级分类、受控二级分类和多标签自动整理"
             } else {
                 "未填写 DeepSeek Key 时使用固定分类词"
             },
@@ -112,67 +105,12 @@ private fun AiClassificationSettingsPanel(state: AppUiState, actions: AppActions
             onValueChange = { deepSeekKey = it },
             label = "DeepSeek API Key",
         )
-        Spacer(Modifier.height(12.dp))
-        ProfileTextField(
-            value = embeddingKey,
-            onValueChange = { embeddingKey = it },
-            label = "Embedding API Key",
-        )
-        Spacer(Modifier.height(12.dp))
-        ProfileTextField(
-            value = embeddingBaseUrl,
-            onValueChange = { embeddingBaseUrl = it },
-            label = "Embedding Base URL",
-        )
-        Spacer(Modifier.height(20.dp))
-        Text(
-            text = "分类宽容度",
-            color = if (smartEnabled) JiShiColors.TextPrimary else JiShiColors.TextTertiary,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AiClassificationTolerance.entries.forEach { option ->
-                ToleranceOption(
-                    text = option.label,
-                    selected = tolerance == option,
-                    enabled = smartEnabled,
-                    onClick = {
-                        tolerance = option
-                        splitThreshold = option.splitThreshold.toString()
-                        matchThreshold = option.matchThreshold.toString()
-                    },
-                )
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        ProfileTextField(
-            value = splitThreshold,
-            onValueChange = { splitThreshold = it.filter(Char::isDigit).take(3) },
-            label = "裂变阈值",
-            enabled = smartEnabled,
-            keyboardType = KeyboardType.Number,
-        )
-        Spacer(Modifier.height(12.dp))
-        ProfileTextField(
-            value = matchThreshold,
-            onValueChange = { matchThreshold = it.filter { char -> char.isDigit() || char == '.' }.take(4) },
-            label = "匹配度阈值",
-            enabled = smartEnabled && embeddingEnabled,
-            keyboardType = KeyboardType.Decimal,
-        )
         Spacer(Modifier.height(16.dp))
         Button(
             onClick = {
                 actions.saveAiSettings(
                     AiClassificationSettings(
                         deepSeekApiKey = deepSeekKey,
-                        embeddingApiKey = embeddingKey,
-                        embeddingBaseUrl = embeddingBaseUrl,
-                        tolerance = tolerance,
-                        customSplitThreshold = splitThreshold.toIntOrNull() ?: tolerance.splitThreshold,
-                        customMatchThreshold = matchThreshold.toDoubleOrNull() ?: tolerance.matchThreshold,
                     ),
                 )
             },
@@ -199,29 +137,6 @@ private fun ProfileTextField(
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         modifier = Modifier.fillMaxWidth(),
-    )
-}
-
-@Composable
-private fun ToleranceOption(text: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    Text(
-        text = text,
-        color = when {
-            !enabled -> JiShiColors.TextTertiary
-            selected -> JiShiColors.Paper
-            else -> JiShiColors.TextPrimary
-        },
-        fontSize = 14.sp,
-        fontWeight = FontWeight.SemiBold,
-        modifier = Modifier
-            .background(if (selected && enabled) JiShiColors.TextPrimary else JiShiColors.Paper)
-            .clickable(
-                enabled = enabled,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            )
-            .padding(horizontal = 14.dp, vertical = 8.dp),
     )
 }
 

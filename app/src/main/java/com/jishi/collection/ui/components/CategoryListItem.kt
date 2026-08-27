@@ -43,9 +43,9 @@ import com.jishi.collection.ui.theme.JiShiColors
 fun CategoryListItem(
     category: CategorySummary,
     onOpen: () -> Unit,
-    onEdit: () -> Unit,
-    highlighted: Boolean = false,
     modifier: Modifier = Modifier,
+    onEdit: (() -> Unit)? = null,
+    highlighted: Boolean = false,
 ) {
     val rowBackground by animateColorAsState(
         targetValue = if (highlighted) Color(0x1AD93025) else Color.Transparent,
@@ -83,7 +83,7 @@ fun CategoryListItem(
                     maxLines = 1,
                 )
             }
-            if (!category.isInvalid) {
+            if (!category.isInvalid && onEdit != null) {
                 Box(
                     modifier = Modifier
                         .padding(start = 16.dp)
